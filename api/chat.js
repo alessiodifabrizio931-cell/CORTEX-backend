@@ -29,8 +29,7 @@ export default async function handler(req, res) {
       if (!parts.length) parts.push({ text: "" });
       return { role, parts };
     });
-
-    const body = { contents, generationConfig: { maxOutputTokens: 1200, temperature: 0.7 } };
+const body = { contents, generationConfig: { maxOutputTokens: 8192, temperature: 0.7 } };
     if (system) body.systemInstruction = { parts: [{ text: system }] };
 
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${key}`;
