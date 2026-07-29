@@ -23,6 +23,35 @@ export default async function handler(req, res) {
       return res.status(200).json({ photos });
     }
 
+    // --- RICERCA ATTIVITA' GOOGLE PLACES (per OCULUS) ---
+    if (body.action === "places") {
+      const gk = process.env.PLACES_API_KEY;
+      if (!gk) return res.status(500).json({ error: "PLACES_API_KEY mancante" });
+      const textQuery = (body.query || "").toString().slice(0, 200);
+      if (!textQuery) return res.status(400).json({ error: "query mancante" });
+      const pr = await fetch("https://places.googleapis.com/v1/places:searchText", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Goog-Api-Key": gk,
+          "X-Goog-FieldMask": "places.displayName,places.formattedAddress,places.nationalPhoneNumber,places.internationalPhoneNumber,places.websiteUri,places.primaryTypeDisplayName,places.googleMapsUri,places.rating"
+        },
+        body: JSON.stringify({ textQuery, languageCode: "it", regionCode: "IT", maxResultCount: 20 })
+      });
+      const pd = await pr.json();
+      if (!pr.ok) return res.status(pr.status).json({ error: pd?.error?.message || "Errore Places" });
+      const results = (pd.places || []).map((p) => ({
+        nome: p.displayName?.text || "",
+        indirizzo: p.formattedAddress || "",
+        categoria: p.primaryTypeDisplayName?.text || "",
+        telefono: p.internationalPhoneNumber || p.nationalPhoneNumber || null,
+        sito: p.websiteUri || null,
+        maps: p.googleMapsUri || null,
+        rating: p.rating || null
+      }));
+      return res.status(200).json({ results });
+    }
+
     // --- CHAT GEMINI (agenti) ---
     const { system, messages } = body;
     if (!Array.isArray(messages)) return res.status(400).json({ error: "messages mancante" });
