@@ -64,7 +64,7 @@ export default async function handler(req, res) {
         height: 1920,
         elements: [
           { type: "video", track: 1, source: bgUrl, fit: "cover", loop: true, volume: "0%" },
-          { type: "audio", track: 2, source: script, provider: `elevenlabs model=eleven_multilingual_v2 voice=${voiceId}` },
+          { type: "audio", track: 2, source: script, provider: `elevenlabs model_id=eleven_multilingual_v2 voice_id=${voiceId}` },
           {
             type: "text", track: 3,
             transcript_source: "auto",
@@ -227,4 +227,3 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: String(e && e.message ? e.message : e) });
   }
 }
-
