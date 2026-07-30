@@ -30,6 +30,70 @@ export default async function handler(req, res) {
       return res.status(200).json({ photos });
     }
 
+    // --- GENERAZIONE VIDEO (per PULSUS / LUMEN) ---
+    // Sfondo clip Pexels + voce ElevenLabs + sottotitoli automatici -> mp4 9:16
+    if (body.action === "video") {
+      const ck = process.env.CREATOMATE_API_KEY;
+      const pk = process.env.PEXELS_API_KEY;
+      if (!ck) return res.status(500).json({ error: "CREATOMATE_API_KEY mancante" });
+      if (!pk) return res.status(500).json({ error: "PEXELS_API_KEY mancante" });
+
+      const script = (body.script || "").toString().trim();
+      if (!script) return res.status(400).json({ error: "script mancante (il testo da leggere)" });
+      const query = (body.query || "abstract background").toString().trim();
+      const voiceId = (body.voiceId || "XrExE9yKIg1WjnnlVkGX").toString().trim(); // default: Matilda
+
+      // 1) cerca clip verticale su Pexels
+      const per = 15;
+      const vr = await fetch(`https://api.pexels.com/videos/search?query=${encodeURIComponent(query)}&orientation=portrait&per_page=${per}`, { headers: { Authorization: pk } });
+      const vd = await vr.json();
+      if (!vr.ok) return res.status(vr.status).json({ error: vd?.error || "Errore Pexels video" });
+      const videos = vd.videos || [];
+      if (!videos.length) return res.status(404).json({ error: `Nessuna clip Pexels per "${query}"` });
+      const pick = videos[Math.floor(Math.random() * videos.length)];
+      const files = (pick.video_files || [])
+        .filter((f) => f.file_type === "video/mp4" && (f.height || 0) >= (f.width || 0))
+        .sort((a, b) => Math.abs((a.height || 0) - 1920) - Math.abs((b.height || 0) - 1920));
+      const bgUrl = files.length ? files[0].link : (pick.video_files?.[0]?.link || null);
+      if (!bgUrl) return res.status(404).json({ error: "Nessun file mp4 utilizzabile da Pexels" });
+
+      // 2) costruisci la composizione per Creatomate
+      const source = {
+        output_format: "mp4",
+        width: 1080,
+        height: 1920,
+        elements: [
+          { type: "video", track: 1, source: bgUrl, fit: "cover", loop: true, volume: "0%" },
+          { type: "audio", track: 2, source: script, provider: `elevenlabs model=eleven_multilingual_v2 voice=${voiceId}` },
+          {
+            type: "text", track: 3,
+            transcript_source: "auto",
+            transcript_effect: "highlight",
+            transcript_maximum_length: 24,
+            y: "80%", width: "90%",
+            x_alignment: "50%", y_alignment: "50%",
+            font_family: "Noto Sans", font_weight: "700", font_size: "8 vmin",
+            fill_color: "#ffffff",
+            background_color: "rgba(0,0,0,0.65)",
+            background_x_padding: "26%", background_y_padding: "8%",
+            text_transform: "uppercase"
+          }
+        ]
+      };
+
+      // 3) chiedi il render a Creatomate
+      const cr = await fetch("https://api.creatomate.com/v1/renders", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${ck}` },
+        body: JSON.stringify({ source })
+      });
+      const cd = await cr.json();
+      if (!cr.ok) return res.status(cr.status).json({ error: "Errore Creatomate", details: cd });
+      const render = Array.isArray(cd) ? cd[0] : cd;
+
+      return res.status(200).json({ ok: true, status: render.status, id: render.id, url: render.url, background_used: bgUrl, voice_used: voiceId });
+    }
+
     // --- RICERCA ATTIVITA' GOOGLE PLACES (per OCULUS) ---
     if (body.action === "places") {
       const gk = process.env.PLACES_API_KEY;
