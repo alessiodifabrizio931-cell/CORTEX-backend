@@ -94,6 +94,30 @@ export default async function handler(req, res) {
       return res.status(200).json({ ok: true, status: render.status, id: render.id, url: render.url, background_used: bgUrl, voice_used: voiceId });
     }
 
+    // --- STATO DEL RENDER VIDEO (polling) ---
+    // Dato l'id di un render Creatomate, ne restituisce lo stato aggiornato
+    // e, quando pronto, l'URL definitivo dell'mp4.
+    if (body.action === "video_status") {
+      const ck = process.env.CREATOMATE_API_KEY;
+      if (!ck) return res.status(500).json({ error: "CREATOMATE_API_KEY mancante" });
+      const id = (body.id || "").toString().trim();
+      if (!id) return res.status(400).json({ error: "id mancante" });
+
+      const sr = await fetch("https://api.creatomate.com/v1/renders/" + encodeURIComponent(id), {
+        headers: { "Authorization": `Bearer ${ck}` }
+      });
+      const sd = await sr.json();
+      if (!sr.ok) return res.status(sr.status).json({ error: "Errore stato Creatomate", details: sd });
+
+      // sd.status: planned, waiting, transcribing, rendering, succeeded, failed
+      return res.status(200).json({
+        ok: true,
+        status: sd.status || "unknown",
+        url: sd.status === "succeeded" ? (sd.url || null) : null,
+        error_message: sd.error_message || null
+      });
+    }
+
     // --- RICERCA ATTIVITA' GOOGLE PLACES (per OCULUS) ---
     if (body.action === "places") {
       const gk = process.env.PLACES_API_KEY;
@@ -203,3 +227,4 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: String(e && e.message ? e.message : e) });
   }
 }
+
