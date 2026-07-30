@@ -64,18 +64,18 @@ export default async function handler(req, res) {
         height: 1920,
         elements: [
           { type: "video", track: 1, source: bgUrl, fit: "cover", loop: true, volume: "0%" },
-          { type: "audio", track: 2, source: script, provider: `elevenlabs model_id=eleven_multilingual_v2 voice_id=${voiceId}` },
+          { type: "audio", id: "voce", track: 2, source: script, provider: `elevenlabs model_id=eleven_multilingual_v2 voice_id=${voiceId}` },
           {
             type: "text", track: 3,
-            transcript_source: "auto",
+            transcript_source: "voce",
             transcript_effect: "highlight",
-            transcript_maximum_length: 24,
-            y: "80%", width: "90%",
+            transcript_maximum_length: 1,
+            y: "80%", width: "90%", height: "35%",
             x_alignment: "50%", y_alignment: "50%",
-            font_family: "Noto Sans", font_weight: "700", font_size: "8 vmin",
+            font_family: "Montserrat", font_weight: "700", font_size: "9 vmin",
             fill_color: "#ffffff",
-            background_color: "rgba(0,0,0,0.65)",
-            background_x_padding: "26%", background_y_padding: "8%",
+            stroke_color: "#000000", stroke_width: "1.6 vmin",
+            background_color: "rgba(0,0,0,0)",
             text_transform: "uppercase"
           }
         ]
