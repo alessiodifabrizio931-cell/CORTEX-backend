@@ -1,19 +1,32 @@
 import { searchPlaces } from "../services/places.js";
+import { searchPaidDemand } from "../services/paidDemand.js";
 
 const MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash-lite";
 
 function chunkText(t) {
   t = (t || "").toString();
+
   const out = [];
+
   for (let i = 0; i < t.length; i += 1900) {
     out.push({
       type: "text",
-      text: { content: t.slice(i, i + 1900) }
+      text: {
+        content: t.slice(i, i + 1900)
+      }
     });
   }
+
   return out.length
     ? out
-    : [{ type: "text", text: { content: "" } }];
+    : [
+        {
+          type: "text",
+          text: {
+            content: ""
+          }
+        }
+      ];
 }
 
 export default async function handler(req, res) {
@@ -26,7 +39,9 @@ export default async function handler(req, res) {
   }
 
   if (req.method !== "POST") {
-    return res.status(405).json({ error: "Usa POST" });
+    return res.status(405).json({
+      error: "Usa POST"
+    });
   }
 
   try {
@@ -35,6 +50,7 @@ export default async function handler(req, res) {
     // ============================================================
     // IRIDE — RICERCA FOTO PEXELS
     // ============================================================
+
     if (body.action === "pexels") {
       const pk = process.env.PEXELS_API_KEY;
 
@@ -49,7 +65,10 @@ export default async function handler(req, res) {
       );
 
       const per = Math.min(
-        Math.max(parseInt(body.per_page) || 9, 1),
+        Math.max(
+          parseInt(body.per_page) || 9,
+          1
+        ),
         15
       );
 
@@ -66,52 +85,78 @@ export default async function handler(req, res) {
 
       if (!pr.ok) {
         return res.status(pr.status).json({
-          error: pd?.error || "Errore Pexels"
+          error:
+            pd?.error ||
+            "Errore Pexels"
         });
       }
 
-      const photos = (pd.photos || []).map((p) => ({
-        src: p.src?.large || p.src?.medium,
-        thumb: p.src?.tiny,
-        alt: p.alt || "",
-        author: p.photographer || "",
-        url: p.url || ""
-      }));
+      const photos = (pd.photos || []).map(
+        (p) => ({
+          src:
+            p.src?.large ||
+            p.src?.medium,
 
-      return res.status(200).json({ photos });
+          thumb:
+            p.src?.tiny,
+
+          alt:
+            p.alt || "",
+
+          author:
+            p.photographer || "",
+
+          url:
+            p.url || ""
+        })
+      );
+
+      return res.status(200).json({
+        photos
+      });
     }
 
     // ============================================================
     // PULSUS / LUMEN — GENERAZIONE VIDEO
     // ============================================================
+
     if (body.action === "video") {
-      const ck = process.env.CREATOMATE_API_KEY;
-      const pk = process.env.PEXELS_API_KEY;
+      const ck =
+        process.env.CREATOMATE_API_KEY;
+
+      const pk =
+        process.env.PEXELS_API_KEY;
 
       if (!ck) {
         return res.status(500).json({
-          error: "CREATOMATE_API_KEY mancante"
+          error:
+            "CREATOMATE_API_KEY mancante"
         });
       }
 
       if (!pk) {
         return res.status(500).json({
-          error: "PEXELS_API_KEY mancante"
+          error:
+            "PEXELS_API_KEY mancante"
         });
       }
 
-      const script = (body.script || "")
+      const script = (
+        body.script || ""
+      )
         .toString()
         .trim();
 
       if (!script) {
         return res.status(400).json({
-          error: "script mancante (il testo da leggere)"
+          error:
+            "script mancante (il testo da leggere)"
         });
       }
 
       const query = (
-        body.query || "abstract background"
+        body.query ||
+        "abstract background"
       )
         .toString()
         .trim();
@@ -123,7 +168,6 @@ export default async function handler(req, res) {
         .toString()
         .trim();
 
-      // 1. Cerca clip verticale su Pexels
       const per = 15;
 
       const vr = await fetch(
@@ -141,21 +185,28 @@ export default async function handler(req, res) {
 
       if (!vr.ok) {
         return res.status(vr.status).json({
-          error: vd?.error || "Errore Pexels video"
+          error:
+            vd?.error ||
+            "Errore Pexels video"
         });
       }
 
-      const videos = vd.videos || [];
+      const videos =
+        vd.videos || [];
 
       if (!videos.length) {
         return res.status(404).json({
-          error: `Nessuna clip Pexels per "${query}"`
+          error:
+            `Nessuna clip Pexels per "${query}"`
         });
       }
 
       const pick =
         videos[
-          Math.floor(Math.random() * videos.length)
+          Math.floor(
+            Math.random() *
+              videos.length
+          )
         ];
 
       const files = (
@@ -163,7 +214,8 @@ export default async function handler(req, res) {
       )
         .filter(
           (f) =>
-            f.file_type === "video/mp4" &&
+            f.file_type ===
+              "video/mp4" &&
             (f.height || 0) >=
               (f.width || 0)
         )
@@ -173,10 +225,13 @@ export default async function handler(req, res) {
             (a.height || 0)
         );
 
-      const bgUrl = files.length
-        ? files[0].link
-        : pick.video_files?.[0]?.link ||
-          null;
+      const bgUrl =
+        files.length
+          ? files[0].link
+          : (
+              pick.video_files?.[0]
+                ?.link || null
+            );
 
       if (!bgUrl) {
         return res.status(404).json({
@@ -185,11 +240,11 @@ export default async function handler(req, res) {
         });
       }
 
-      // 2. Composizione Creatomate
       const source = {
         output_format: "mp4",
         width: 1080,
         height: 1920,
+
         elements: [
           {
             type: "video",
@@ -199,6 +254,7 @@ export default async function handler(req, res) {
             loop: true,
             volume: "0%"
           },
+
           {
             type: "audio",
             id: "voce",
@@ -207,13 +263,19 @@ export default async function handler(req, res) {
             provider:
               `elevenlabs model_id=eleven_multilingual_v2 voice_id=${voiceId}`
           },
+
           {
             type: "text",
             track: 3,
 
-            transcript_source: "voce",
-            transcript_effect: "highlight",
-            transcript_maximum_length: 1,
+            transcript_source:
+              "voce",
+
+            transcript_effect:
+              "highlight",
+
+            transcript_maximum_length:
+              1,
 
             y: "80%",
             width: "90%",
@@ -222,33 +284,45 @@ export default async function handler(req, res) {
             x_alignment: "50%",
             y_alignment: "50%",
 
-            font_family: "Montserrat",
+            font_family:
+              "Montserrat",
+
             font_weight: "700",
-            font_size: "9 vmin",
 
-            fill_color: "#ffffff",
+            font_size:
+              "9 vmin",
 
-            stroke_color: "#000000",
-            stroke_width: "1.6 vmin",
+            fill_color:
+              "#ffffff",
+
+            stroke_color:
+              "#000000",
+
+            stroke_width:
+              "1.6 vmin",
 
             background_color:
               "rgba(0,0,0,0)",
 
-            text_transform: "uppercase"
+            text_transform:
+              "uppercase"
           }
         ]
       };
 
-      // 3. Render Creatomate
       const cr = await fetch(
         "https://api.creatomate.com/v1/renders",
         {
           method: "POST",
+
           headers: {
             "Content-Type":
               "application/json",
-            Authorization: `Bearer ${ck}`
+
+            Authorization:
+              `Bearer ${ck}`
           },
+
           body: JSON.stringify({
             source
           })
@@ -259,32 +333,50 @@ export default async function handler(req, res) {
 
       if (!cr.ok) {
         return res.status(cr.status).json({
-          error: "Errore Creatomate",
-          details: cd
+          error:
+            "Errore Creatomate",
+
+          details:
+            cd
         });
       }
 
-      const render = Array.isArray(cd)
-        ? cd[0]
-        : cd;
+      const render =
+        Array.isArray(cd)
+          ? cd[0]
+          : cd;
 
       return res.status(200).json({
         ok: true,
-        status: render.status,
-        id: render.id,
-        url: render.url,
 
-        background_used: bgUrl,
-        voice_used: voiceId
+        status:
+          render.status,
+
+        id:
+          render.id,
+
+        url:
+          render.url,
+
+        background_used:
+          bgUrl,
+
+        voice_used:
+          voiceId
       });
     }
 
     // ============================================================
-    // PULSUS / LUMEN — STATO RENDER VIDEO
+    // STATO RENDER VIDEO
     // ============================================================
-    if (body.action === "video_status") {
+
+    if (
+      body.action ===
+      "video_status"
+    ) {
       const ck =
-        process.env.CREATOMATE_API_KEY;
+        process.env
+          .CREATOMATE_API_KEY;
 
       if (!ck) {
         return res.status(500).json({
@@ -293,13 +385,16 @@ export default async function handler(req, res) {
         });
       }
 
-      const id = (body.id || "")
+      const id = (
+        body.id || ""
+      )
         .toString()
         .trim();
 
       if (!id) {
         return res.status(400).json({
-          error: "id mancante"
+          error:
+            "id mancante"
         });
       }
 
@@ -308,7 +403,8 @@ export default async function handler(req, res) {
           encodeURIComponent(id),
         {
           headers: {
-            Authorization: `Bearer ${ck}`
+            Authorization:
+              `Bearer ${ck}`
           }
         }
       );
@@ -319,41 +415,61 @@ export default async function handler(req, res) {
         return res.status(sr.status).json({
           error:
             "Errore stato Creatomate",
-          details: sd
+
+          details:
+            sd
         });
       }
 
       return res.status(200).json({
         ok: true,
-        status: sd.status || "unknown",
+
+        status:
+          sd.status ||
+          "unknown",
 
         url:
-          sd.status === "succeeded"
-            ? sd.url || null
+          sd.status ===
+          "succeeded"
+            ? (
+                sd.url ||
+                null
+              )
             : null,
 
         error_message:
-          sd.error_message || null
+          sd.error_message ||
+          null
       });
     }
 
     // ============================================================
     // NERVUS — DATI DI MERCATO
     // ============================================================
-    if (body.action === "market") {
-      const symbol = (body.symbol || "")
+
+    if (
+      body.action ===
+      "market"
+    ) {
+      const symbol = (
+        body.symbol || ""
+      )
         .toString()
         .trim()
         .toUpperCase();
 
       if (!symbol) {
         return res.status(400).json({
-          error: "symbol mancante"
+          error:
+            "symbol mancante"
         });
       }
 
       const cleanSymbol =
-        symbol.replace(/[^A-Z]/g, "");
+        symbol.replace(
+          /[^A-Z]/g,
+          ""
+        );
 
       const isCrypto =
         /USDT$|BUSD$|BTC$|ETH$/.test(
@@ -361,22 +477,28 @@ export default async function handler(req, res) {
         );
 
       try {
-        // Crypto — Binance
         if (isCrypto) {
-          const s = cleanSymbol;
+          const s =
+            cleanSymbol;
 
           const [t24, kl] =
             await Promise.all([
               fetch(
                 "https://api.binance.com/api/v3/ticker/24hr?symbol=" +
                   s
-              ).then((r) => r.json()),
+              ).then(
+                (r) =>
+                  r.json()
+              ),
 
               fetch(
                 "https://api.binance.com/api/v3/klines?symbol=" +
                   s +
                   "&interval=1h&limit=24"
-              ).then((r) => r.json())
+              ).then(
+                (r) =>
+                  r.json()
+              )
             ]);
 
           if (t24.code) {
@@ -389,43 +511,51 @@ export default async function handler(req, res) {
 
           const closes =
             Array.isArray(kl)
-              ? kl.map((c) =>
-                  Number(c[4])
+              ? kl.map(
+                  (c) =>
+                    Number(c[4])
                 )
               : [];
 
           return res.status(200).json({
             ok: true,
 
-            source: "Binance (live)",
+            source:
+              "Binance (live)",
 
-            symbol: s,
+            symbol:
+              s,
 
-            price: Number(
-              t24.lastPrice
-            ),
+            price:
+              Number(
+                t24.lastPrice
+              ),
 
-            changePct: Number(
-              t24.priceChangePercent
-            ),
+            changePct:
+              Number(
+                t24.priceChangePercent
+              ),
 
-            high24h: Number(
-              t24.highPrice
-            ),
+            high24h:
+              Number(
+                t24.highPrice
+              ),
 
-            low24h: Number(
-              t24.lowPrice
-            ),
+            low24h:
+              Number(
+                t24.lowPrice
+              ),
 
-            volume: Number(
-              t24.volume
-            ),
+            volume:
+              Number(
+                t24.volume
+              ),
 
-            closes1h: closes
+            closes1h:
+              closes
           });
         }
 
-        // Forex / azioni — Twelve Data
         const key =
           process.env
             .TWELVEDATA_API_KEY;
@@ -437,12 +567,18 @@ export default async function handler(req, res) {
           });
         }
 
-        const q = await fetch(
-          "https://api.twelvedata.com/quote?symbol=" +
-            encodeURIComponent(symbol) +
-            "&apikey=" +
-            key
-        ).then((r) => r.json());
+        const q =
+          await fetch(
+            "https://api.twelvedata.com/quote?symbol=" +
+              encodeURIComponent(
+                symbol
+              ) +
+              "&apikey=" +
+              key
+          ).then(
+            (r) =>
+              r.json()
+          );
 
         if (
           q.status === "error" ||
@@ -463,45 +599,76 @@ export default async function handler(req, res) {
 
           symbol,
 
-          price: Number(q.close),
+          price:
+            Number(q.close),
 
-          changePct: Number(
-            q.percent_change
-          ),
+          changePct:
+            Number(
+              q.percent_change
+            ),
 
-          high24h: Number(q.high),
+          high24h:
+            Number(q.high),
 
-          low24h: Number(q.low),
+          low24h:
+            Number(q.low),
 
-          volume: q.volume
-            ? Number(q.volume)
-            : null,
+          volume:
+            q.volume
+              ? Number(
+                  q.volume
+                )
+              : null,
 
-          name: q.name || null,
+          name:
+            q.name || null,
 
           exchange:
             q.exchange || null
         });
       } catch (e) {
         return res.status(500).json({
-          error: String(
-            e.message || e
-          )
+          error:
+            String(
+              e.message || e
+            )
         });
       }
     }
 
     // ============================================================
-    // OCULUS — GOOGLE PLACES
-    // ORA GESTITO DA services/places.js
+    // OCULUS — PROSPECTING GOOGLE PLACES
     // ============================================================
-    if (body.action === "places") {
-      return searchPlaces(body, res);
+
+    if (
+      body.action ===
+      "places"
+    ) {
+      return searchPlaces(
+        body,
+        res
+      );
     }
 
     // ============================================================
-    // NOTION — HELPER
+    // OCULUS — PAID DEMAND
+    // Cerca richieste online di servizi/prodotti digitali
     // ============================================================
+
+    if (
+      body.action ===
+      "paid_demand"
+    ) {
+      return searchPaidDemand(
+        body,
+        res
+      );
+    }
+
+    // ============================================================
+    // NOTION
+    // ============================================================
+
     const notionH = () => ({
       Authorization:
         `Bearer ${process.env.NOTION_TOKEN}`,
@@ -513,11 +680,10 @@ export default async function handler(req, res) {
         "application/json"
     });
 
-    // ============================================================
-    // NOTION — HELPERS GENERALI
-    // ============================================================
     const readProp = (p) => {
-      if (!p) return null;
+      if (!p) {
+        return null;
+      }
 
       switch (p.type) {
         case "title":
@@ -525,16 +691,19 @@ export default async function handler(req, res) {
             p.title || []
           )
             .map(
-              (t) => t.plain_text
+              (t) =>
+                t.plain_text
             )
             .join("");
 
         case "rich_text":
           return (
-            p.rich_text || []
+            p.rich_text ||
+            []
           )
             .map(
-              (t) => t.plain_text
+              (t) =>
+                t.plain_text
             )
             .join("");
 
@@ -548,9 +717,13 @@ export default async function handler(req, res) {
 
         case "multi_select":
           return (
-            p.multi_select || []
+            p.multi_select ||
+            []
           )
-            .map((s) => s.name)
+            .map(
+              (s) =>
+                s.name
+            )
             .join(", ");
 
         case "date":
@@ -559,18 +732,25 @@ export default async function handler(req, res) {
             : null;
 
         case "email":
-          return p.email || null;
+          return (
+            p.email ||
+            null
+          );
 
         case "phone_number":
           return (
-            p.phone_number || null
+            p.phone_number ||
+            null
           );
 
         case "checkbox":
           return p.checkbox;
 
         case "url":
-          return p.url || null;
+          return (
+            p.url ||
+            null
+          );
 
         default:
           return null;
@@ -592,179 +772,207 @@ export default async function handler(req, res) {
       schemaProps,
       aliases
     ) => {
-      const keys = Object.keys(
-        schemaProps || {}
-      );
-
-      for (const a of aliases) {
-        const t = norm(a);
-
-        const k = keys.find(
-          (k) => norm(k) === t
+      const keys =
+        Object.keys(
+          schemaProps || {}
         );
 
-        if (k) return k;
+      for (
+        const a of aliases
+      ) {
+        const t =
+          norm(a);
+
+        const k =
+          keys.find(
+            (k) =>
+              norm(k) === t
+          );
+
+        if (k) {
+          return k;
+        }
       }
 
       return null;
     };
 
-    const notionQuery = async (
-      dbId
-    ) => {
-      const r = await fetch(
-        `https://api.notion.com/v1/databases/${dbId}/query`,
-        {
-          method: "POST",
+    const notionQuery =
+      async (dbId) => {
+        const r =
+          await fetch(
+            `https://api.notion.com/v1/databases/${dbId}/query`,
+            {
+              method:
+                "POST",
 
-          headers: notionH(),
+              headers:
+                notionH(),
 
-          body: JSON.stringify({
-            page_size: 100
-          })
+              body:
+                JSON.stringify({
+                  page_size:
+                    100
+                })
+            }
+          );
+
+        const d =
+          await r.json();
+
+        if (!r.ok) {
+          throw new Error(
+            d?.message ||
+              "Errore query Notion"
+          );
         }
-      );
 
-      const d = await r.json();
-
-      if (!r.ok) {
-        throw new Error(
-          d?.message ||
-            "Errore query Notion"
+        return (
+          d.results ||
+          []
         );
-      }
+      };
 
-      return d.results || [];
-    };
+    const notionSchema =
+      async (dbId) => {
+        const r =
+          await fetch(
+            `https://api.notion.com/v1/databases/${dbId}`,
+            {
+              headers:
+                notionH()
+            }
+          );
 
-    const notionSchema = async (
-      dbId
-    ) => {
-      const r = await fetch(
-        `https://api.notion.com/v1/databases/${dbId}`,
-        {
-          headers: notionH()
+        const d =
+          await r.json();
+
+        if (!r.ok) {
+          throw new Error(
+            d?.message ||
+              "Errore schema Notion"
+          );
         }
-      );
 
-      const d = await r.json();
-
-      if (!r.ok) {
-        throw new Error(
-          d?.message ||
-            "Errore schema Notion"
+        return (
+          d.properties ||
+          {}
         );
-      }
-
-      return d.properties || {};
-    };
+      };
 
     // ============================================================
     // ATLAS — LEGGI CLIENTI
     // ============================================================
+
     if (
-      body.action === "atlas_read"
+      body.action ===
+      "atlas_read"
     ) {
       if (
         !process.env.NOTION_TOKEN
       ) {
-        return res
-          .status(500)
-          .json({
-            error:
-              "NOTION_TOKEN mancante"
-          });
+        return res.status(500).json({
+          error:
+            "NOTION_TOKEN mancante"
+        });
       }
 
       const dbId = (
         body.databaseId || ""
       )
         .toString()
-        .replace(/-/g, "")
+        .replace(
+          /-/g,
+          ""
+        )
         .trim();
 
       if (!dbId) {
-        return res
-          .status(400)
-          .json({
-            error:
-              "databaseId mancante"
-          });
+        return res.status(400).json({
+          error:
+            "databaseId mancante"
+        });
       }
 
       try {
         const rows =
-          await notionQuery(dbId);
+          await notionQuery(
+            dbId
+          );
 
-        const clienti = rows.map(
-          (pg) => {
-            const pr =
-              pg.properties || {};
+        const clienti =
+          rows.map(
+            (pg) => {
+              const pr =
+                pg.properties ||
+                {};
 
-            const out = {};
+              const out =
+                {};
 
-            for (
-              const [k, v] of
-              Object.entries(pr)
-            ) {
-              out[k] =
-                readProp(v);
+              for (
+                const [k, v] of
+                Object.entries(
+                  pr
+                )
+              ) {
+                out[k] =
+                  readProp(v);
+              }
+
+              out._id =
+                pg.id;
+
+              return out;
             }
+          );
 
-            out._id = pg.id;
-
-            return out;
-          }
-        );
-
-        return res
-          .status(200)
-          .json({
-            ok: true,
-            clienti
-          });
+        return res.status(200).json({
+          ok: true,
+          clienti
+        });
       } catch (e) {
-        return res
-          .status(500)
-          .json({
-            error: String(
+        return res.status(500).json({
+          error:
+            String(
               e.message || e
             )
-          });
+        });
       }
     }
 
     // ============================================================
-    // ATLAS — AGGIUNGI CLIENTE
+    // ATLAS — SCRIVI CLIENTE
     // ============================================================
+
     if (
-      body.action === "atlas_write"
+      body.action ===
+      "atlas_write"
     ) {
       if (
         !process.env.NOTION_TOKEN
       ) {
-        return res
-          .status(500)
-          .json({
-            error:
-              "NOTION_TOKEN mancante"
-          });
+        return res.status(500).json({
+          error:
+            "NOTION_TOKEN mancante"
+        });
       }
 
       const dbId = (
         body.databaseId || ""
       )
         .toString()
-        .replace(/-/g, "")
+        .replace(
+          /-/g,
+          ""
+        )
         .trim();
 
       if (!dbId) {
-        return res
-          .status(400)
-          .json({
-            error:
-              "databaseId mancante"
-          });
+        return res.status(400).json({
+          error:
+            "databaseId mancante"
+        });
       }
 
       const dati =
@@ -772,82 +980,121 @@ export default async function handler(req, res) {
 
       try {
         const schema =
-          await notionSchema(dbId);
+          await notionSchema(
+            dbId
+          );
 
-        const props = {};
+        const props =
+          {};
 
         const map = [
           {
-            al: ["Nome", "Name"],
-            v: dati.nome,
-            t: "title"
+            al: [
+              "Nome",
+              "Name"
+            ],
+            v:
+              dati.nome,
+            t:
+              "title"
           },
+
           {
-            al: ["Stato"],
-            v: dati.stato,
-            t: "select"
+            al:
+              ["Stato"],
+            v:
+              dati.stato,
+            t:
+              "select"
           },
+
           {
-            al: ["Telefono"],
-            v: dati.telefono,
-            t: "rich_text"
+            al:
+              ["Telefono"],
+            v:
+              dati.telefono,
+            t:
+              "rich_text"
           },
+
           {
-            al: ["Email"],
-            v: dati.email,
-            t: "email"
+            al:
+              ["Email"],
+            v:
+              dati.email,
+            t:
+              "email"
           },
+
           {
-            al: ["Servizio"],
-            v: dati.servizio,
-            t: "select"
+            al:
+              ["Servizio"],
+            v:
+              dati.servizio,
+            t:
+              "select"
           },
+
           {
             al: [
               "Citta",
               "Città"
             ],
-            v: dati.citta,
-            t: "rich_text"
+            v:
+              dati.citta,
+            t:
+              "rich_text"
           },
+
           {
-            al: [
-              "Tipo rinnovo"
-            ],
-            v: dati.tipoRinnovo,
-            t: "select"
+            al:
+              ["Tipo rinnovo"],
+            v:
+              dati.tipoRinnovo,
+            t:
+              "select"
           },
+
           {
-            al: [
-              "Data rinnovo"
-            ],
-            v: dati.dataRinnovo,
-            t: "date"
+            al:
+              ["Data rinnovo"],
+            v:
+              dati.dataRinnovo,
+            t:
+              "date"
           },
+
           {
-            al: [
-              "Ultimo contatto"
-            ],
+            al:
+              ["Ultimo contatto"],
             v:
               dati.ultimoContatto,
-            t: "date"
+            t:
+              "date"
           },
+
           {
-            al: [
-              "Prossima azione"
-            ],
+            al:
+              ["Prossima azione"],
             v:
               dati.prossimaAzione,
-            t: "date"
+            t:
+              "date"
           },
+
           {
-            al: ["Note"],
-            v: dati.note,
-            t: "rich_text"
+            al:
+              ["Note"],
+            v:
+              dati.note,
+            t:
+              "rich_text"
           }
         ];
 
-        for (const m of map) {
+        for (
+          const m of map
+        ) {
           if (
             m.v == null ||
             m.v === ""
@@ -861,20 +1108,25 @@ export default async function handler(req, res) {
               m.al
             );
 
-          if (!key) continue;
+          if (!key) {
+            continue;
+          }
 
           const realType =
             schema[key].type;
 
           if (
-            realType === "title"
+            realType ===
+            "title"
           ) {
             props[key] = {
               title: [
                 {
                   text: {
                     content:
-                      String(m.v).slice(
+                      String(
+                        m.v
+                      ).slice(
                         0,
                         200
                       )
@@ -882,7 +1134,9 @@ export default async function handler(req, res) {
                 }
               ]
             };
-          } else if (
+          }
+
+          else if (
             realType ===
             "rich_text"
           ) {
@@ -891,7 +1145,9 @@ export default async function handler(req, res) {
                 {
                   text: {
                     content:
-                      String(m.v).slice(
+                      String(
+                        m.v
+                      ).slice(
                         0,
                         1800
                       )
@@ -899,98 +1155,131 @@ export default async function handler(req, res) {
                 }
               ]
             };
-          } else if (
-            realType === "select"
+          }
+
+          else if (
+            realType ===
+            "select"
           ) {
             props[key] = {
               select: {
                 name:
-                  String(m.v).slice(
+                  String(
+                    m.v
+                  ).slice(
                     0,
                     100
                   )
               }
             };
-          } else if (
-            realType === "email"
+          }
+
+          else if (
+            realType ===
+            "email"
           ) {
             props[key] = {
-              email: String(m.v)
+              email:
+                String(
+                  m.v
+                )
             };
-          } else if (
+          }
+
+          else if (
             realType ===
             "phone_number"
           ) {
             props[key] = {
               phone_number:
-                String(m.v)
+                String(
+                  m.v
+                )
             };
-          } else if (
-            realType === "date"
+          }
+
+          else if (
+            realType ===
+            "date"
           ) {
             props[key] = {
               date: {
-                start: String(m.v)
+                start:
+                  String(
+                    m.v
+                  )
               }
             };
-          } else if (
-            realType === "number"
+          }
+
+          else if (
+            realType ===
+            "number"
           ) {
             props[key] = {
-              number: Number(m.v)
+              number:
+                Number(
+                  m.v
+                )
             };
           }
         }
 
-        const r = await fetch(
-          "https://api.notion.com/v1/pages",
-          {
-            method: "POST",
+        const r =
+          await fetch(
+            "https://api.notion.com/v1/pages",
+            {
+              method:
+                "POST",
 
-            headers: notionH(),
+              headers:
+                notionH(),
 
-            body: JSON.stringify({
-              parent: {
-                database_id: dbId
-              },
+              body:
+                JSON.stringify({
+                  parent: {
+                    database_id:
+                      dbId
+                  },
 
-              properties: props
-            })
-          }
-        );
+                  properties:
+                    props
+                })
+            }
+          );
 
-        const d = await r.json();
+        const d =
+          await r.json();
 
         if (!r.ok) {
-          return res
-            .status(r.status)
-            .json({
-              error:
-                d?.message ||
-                "Errore creazione cliente"
-            });
+          return res.status(r.status).json({
+            error:
+              d?.message ||
+              "Errore creazione cliente"
+          });
         }
 
-        return res
-          .status(200)
-          .json({
-            ok: true,
-            url: d.url || null
-          });
+        return res.status(200).json({
+          ok: true,
+
+          url:
+            d.url ||
+            null
+        });
       } catch (e) {
-        return res
-          .status(500)
-          .json({
-            error: String(
+        return res.status(500).json({
+          error:
+            String(
               e.message || e
             )
-          });
+        });
       }
     }
 
     // ============================================================
     // ATLAS — ELIMINA CLIENTE
     // ============================================================
+
     if (
       body.action ===
       "atlas_delete"
@@ -998,12 +1287,10 @@ export default async function handler(req, res) {
       if (
         !process.env.NOTION_TOKEN
       ) {
-        return res
-          .status(500)
-          .json({
-            error:
-              "NOTION_TOKEN mancante"
-          });
+        return res.status(500).json({
+          error:
+            "NOTION_TOKEN mancante"
+        });
       }
 
       const pageId = (
@@ -1013,92 +1300,95 @@ export default async function handler(req, res) {
         .trim();
 
       if (!pageId) {
-        return res
-          .status(400)
-          .json({
-            error:
-              "pageId mancante"
-          });
+        return res.status(400).json({
+          error:
+            "pageId mancante"
+        });
       }
 
       try {
-        const r = await fetch(
-          "https://api.notion.com/v1/pages/" +
-            pageId,
-          {
-            method: "PATCH",
-            headers: notionH(),
+        const r =
+          await fetch(
+            "https://api.notion.com/v1/pages/" +
+              pageId,
+            {
+              method:
+                "PATCH",
 
-            body: JSON.stringify({
-              archived: true
-            })
-          }
-        );
+              headers:
+                notionH(),
 
-        const d = await r.json();
+              body:
+                JSON.stringify({
+                  archived:
+                    true
+                })
+            }
+          );
+
+        const d =
+          await r.json();
 
         if (!r.ok) {
-          return res
-            .status(r.status)
-            .json({
-              error:
-                d?.message ||
-                "Errore eliminazione"
-            });
+          return res.status(r.status).json({
+            error:
+              d?.message ||
+              "Errore eliminazione"
+          });
         }
 
-        return res
-          .status(200)
-          .json({
-            ok: true
-          });
+        return res.status(200).json({
+          ok: true
+        });
       } catch (e) {
-        return res
-          .status(500)
-          .json({
-            error: String(
+        return res.status(500).json({
+          error:
+            String(
               e.message || e
             )
-          });
+        });
       }
     }
 
     // ============================================================
-    // MIDAS — LEGGI MOVIMENTI / CONTI
+    // MIDAS — LEGGI CONTI
     // ============================================================
+
     if (
-      body.action === "midas_read"
+      body.action ===
+      "midas_read"
     ) {
       if (
         !process.env.NOTION_TOKEN
       ) {
-        return res
-          .status(500)
-          .json({
-            error:
-              "NOTION_TOKEN mancante"
-          });
+        return res.status(500).json({
+          error:
+            "NOTION_TOKEN mancante"
+        });
       }
 
       const dbId = (
         body.databaseId || ""
       )
         .toString()
-        .replace(/-/g, "")
+        .replace(
+          /-/g,
+          ""
+        )
         .trim();
 
       if (!dbId) {
-        return res
-          .status(400)
-          .json({
-            error:
-              "databaseId mancante"
-          });
+        return res.status(400).json({
+          error:
+            "databaseId mancante"
+        });
       }
 
       try {
         const schema =
-          await notionSchema(dbId);
+          await notionSchema(
+            dbId
+          );
 
         const kImporto =
           findProp(
@@ -1153,25 +1443,33 @@ export default async function handler(req, res) {
           );
 
         const rows =
-          await notionQuery(dbId);
+          await notionQuery(
+            dbId
+          );
 
         const movimenti =
-          rows.map((pg) => {
-            const pr =
-              pg.properties || {};
+          rows.map(
+            (pg) => {
+              const pr =
+                pg.properties ||
+                {};
 
-            const out = {};
+              const out =
+                {};
 
-            for (
-              const [k, v] of
-              Object.entries(pr)
-            ) {
-              out[k] =
-                readProp(v);
+              for (
+                const [k, v] of
+                Object.entries(
+                  pr
+                )
+              ) {
+                out[k] =
+                  readProp(v);
+              }
+
+              return out;
             }
-
-            return out;
-          });
+          );
 
         const now =
           new Date();
@@ -1180,33 +1478,44 @@ export default async function handler(req, res) {
           now.getFullYear() +
           "-" +
           String(
-            now.getMonth() + 1
-          ).padStart(2, "0");
+            now.getMonth() +
+              1
+          ).padStart(
+            2,
+            "0"
+          );
 
-        const mesiTrascorsi = (
-          dataStart
-        ) => {
-          if (!dataStart) {
-            return 1;
-          }
+        const mesiTrascorsi =
+          (dataStart) => {
+            if (!dataStart) {
+              return 1;
+            }
 
-          const d =
-            new Date(dataStart);
+            const d =
+              new Date(
+                dataStart
+              );
 
-          if (isNaN(d)) {
-            return 1;
-          }
+            if (isNaN(d)) {
+              return 1;
+            }
 
-          let m =
-            (now.getFullYear() -
-              d.getFullYear()) *
-              12 +
-            (now.getMonth() -
-              d.getMonth()) +
-            1;
+            let m =
+              (
+                now.getFullYear() -
+                d.getFullYear()
+              ) *
+                12 +
+              (
+                now.getMonth() -
+                d.getMonth()
+              ) +
+              1;
 
-          return m < 1 ? 0 : m;
-        };
+            return m < 1
+              ? 0
+              : m;
+          };
 
         let entrate = 0;
         let uscite = 0;
@@ -1236,14 +1545,9 @@ export default async function handler(req, res) {
           const cat =
             norm(
               kCategoria
-                ? m[kCategoria]
-                : ""
-            );
-
-          const stato =
-            norm(
-              kStato
-                ? m[kStato]
+                ? m[
+                    kCategoria
+                  ]
                 : ""
             );
 
@@ -1255,7 +1559,9 @@ export default async function handler(req, res) {
           const ric =
             norm(
               kRicorrenza
-                ? m[kRicorrenza]
+                ? m[
+                    kRicorrenza
+                  ]
                 : ""
             );
 
@@ -1271,36 +1577,44 @@ export default async function handler(req, res) {
           const mesiDur =
             isUnaTantum
               ? 1
-              : Number(
-                  kMesiDurata
-                    ? m[
-                        kMesiDurata
-                      ]
-                    : 0
-                ) ||
-                (ric.includes(
-                  "trimestr"
-                )
-                  ? 3
-                  : ric.includes(
-                      "semestr"
+              : (
+                  Number(
+                    kMesiDurata
+                      ? m[
+                          kMesiDurata
+                        ]
+                      : 0
+                  ) ||
+                  (
+                    ric.includes(
+                      "trimestr"
                     )
-                  ? 6
-                  : ric.includes(
-                      "annual"
-                    )
-                  ? 12
-                  : ric.includes(
-                      "mensile"
-                    )
-                  ? 12
-                  : 1);
+                      ? 3
+                      : ric.includes(
+                          "semestr"
+                        )
+                      ? 6
+                      : ric.includes(
+                          "annual"
+                        )
+                      ? 12
+                      : ric.includes(
+                          "mensile"
+                        )
+                      ? 12
+                      : 1
+                  )
+                );
 
           const isFatturato =
             kFatturato
               ? norm(
-                  m[kFatturato]
-                ).startsWith("s")
+                  m[
+                    kFatturato
+                  ]
+                ).startsWith(
+                  "s"
+                )
               : !(
                   cat.includes(
                     "da fatturare"
@@ -1347,27 +1661,34 @@ export default async function handler(req, res) {
           const attivaOra =
             isUnaTantum
               ? false
-              : mesiTrascorsi(
+              : (
+                  mesiTrascorsi(
                     dataStr
-                  ) <= mesiDur &&
-                mesiTrascorsi(
-                  dataStr
-                ) >= 1;
+                  ) <=
+                    mesiDur &&
+                  mesiTrascorsi(
+                    dataStr
+                  ) >=
+                    1
+                );
 
           const nelMeseCorrente =
             dataStr &&
-            new Date(
-              dataStr
-            ).getFullYear() +
+            (
+              new Date(
+                dataStr
+              ).getFullYear() +
               "-" +
               String(
                 new Date(
                   dataStr
-                ).getMonth() + 1
+                ).getMonth() +
+                  1
               ).padStart(
                 2,
                 "0"
-              ) ===
+              )
+            ) ===
               meseCorrente;
 
           if (isUscita) {
@@ -1425,9 +1746,6 @@ export default async function handler(req, res) {
           }
         }
 
-        // --------------------------------------------------------
-        // EXTRA ATTUALI
-        // --------------------------------------------------------
         const meseDaGennaio2026 =
           () => {
             const g =
@@ -1438,11 +1756,15 @@ export default async function handler(req, res) {
               );
 
             let m =
-              (now.getFullYear() -
-                g.getFullYear()) *
+              (
+                now.getFullYear() -
+                g.getFullYear()
+              ) *
                 12 +
-              (now.getMonth() -
-                g.getMonth()) +
+              (
+                now.getMonth() -
+                g.getMonth()
+              ) +
               1;
 
             return m < 1
@@ -1454,7 +1776,8 @@ export default async function handler(req, res) {
           meseDaGennaio2026();
 
         const extraCoopMensile =
-          60 * mesiCoop;
+          60 *
+          mesiCoop;
 
         const extraCoopSito =
           500;
@@ -1484,21 +1807,26 @@ export default async function handler(req, res) {
         entrateMese +=
           incassiExtraMese;
 
-        // --------------------------------------------------------
-        // FISCALE
-        // --------------------------------------------------------
-        const COEFF = 0.78;
-        const IMPOSTA = 0.05;
-        const INPS = 0.2607;
+        const COEFF =
+          0.78;
+
+        const IMPOSTA =
+          0.05;
+
+        const INPS =
+          0.2607;
 
         const imponibile =
-          fatturato * COEFF;
+          fatturato *
+          COEFF;
 
         const impostaSost =
-          imponibile * IMPOSTA;
+          imponibile *
+          IMPOSTA;
 
         const contributiInps =
-          imponibile * INPS;
+          imponibile *
+          INPS;
 
         const daAccantonare =
           impostaSost +
@@ -1509,122 +1837,124 @@ export default async function handler(req, res) {
             n * 100
           ) / 100;
 
-        return res
-          .status(200)
-          .json({
-            ok: true,
+        return res.status(200).json({
+          ok: true,
 
-            movimenti,
+          movimenti,
 
-            conti: {
+          conti: {
+            entrate:
+              r2(
+                entrate
+              ),
+
+            uscite:
+              r2(
+                uscite
+              ),
+
+            saldo:
+              r2(
+                entrate -
+                  uscite
+              ),
+
+            fatturato:
+              r2(
+                fatturato
+              ),
+
+            daFatturare:
+              r2(
+                daFatturare
+              ),
+
+            meseCorrente: {
+              label:
+                meseCorrente,
+
               entrate:
-                r2(entrate),
+                r2(
+                  entrateMese
+                ),
 
               uscite:
-                r2(uscite),
+                r2(
+                  usciteMese
+                ),
 
               saldo:
                 r2(
-                  entrate -
-                    uscite
-                ),
-
-              fatturato:
-                r2(
-                  fatturato
-                ),
-
-              daFatturare:
-                r2(
-                  daFatturare
-                ),
-
-              meseCorrente: {
-                label:
-                  meseCorrente,
-
-                entrate:
-                  r2(
-                    entrateMese
-                  ),
-
-                uscite:
-                  r2(
+                  entrateMese -
                     usciteMese
-                  ),
+                )
+            },
 
-                saldo:
-                  r2(
-                    entrateMese -
-                      usciteMese
-                  )
-              },
+            extra: {
+              furoreMensile:
+                500,
 
-              extra: {
-                furoreMensile:
-                  500,
+              coopMensile:
+                60,
 
-                coopMensile:
-                  60,
+              coopSito:
+                500,
 
-                coopSito:
-                  500,
+              mesiConteggiati:
+                mesiCoop,
 
-                mesiConteggiati:
-                  mesiCoop,
+              incassiExtraTotale:
+                r2(
+                  incassiExtraTotale
+                )
+            },
 
-                incassiExtraTotale:
-                  r2(
-                    incassiExtraTotale
-                  )
-              },
+            fiscale: {
+              coefficiente:
+                COEFF,
 
-              fiscale: {
-                coefficiente:
-                  COEFF,
+              aliquotaImposta:
+                IMPOSTA,
 
-                aliquotaImposta:
-                  IMPOSTA,
+              aliquotaInps:
+                INPS,
 
-                aliquotaInps:
-                  INPS,
+              imponibile:
+                r2(
+                  imponibile
+                ),
 
-                imponibile:
-                  r2(
-                    imponibile
-                  ),
+              impostaSostitutiva:
+                r2(
+                  impostaSost
+                ),
 
-                impostaSostitutiva:
-                  r2(
-                    impostaSost
-                  ),
+              contributiInps:
+                r2(
+                  contributiInps
+                ),
 
-                contributiInps:
-                  r2(
-                    contributiInps
-                  ),
-
-                daAccantonare:
-                  r2(
-                    daAccantonare
-                  )
-              }
+              daAccantonare:
+                r2(
+                  daAccantonare
+                )
             }
-          });
+          }
+        });
       } catch (e) {
-        return res
-          .status(500)
-          .json({
-            error: String(
+        return res.status(500).json({
+          error:
+            String(
               e.message || e
             )
-          });
+        });
       }
     }
 
     // ============================================================
     // MIDAS — AGGIUNGI MOVIMENTO
     // ============================================================
+
     if (
       body.action ===
       "midas_write"
@@ -1632,28 +1962,27 @@ export default async function handler(req, res) {
       if (
         !process.env.NOTION_TOKEN
       ) {
-        return res
-          .status(500)
-          .json({
-            error:
-              "NOTION_TOKEN mancante"
-          });
+        return res.status(500).json({
+          error:
+            "NOTION_TOKEN mancante"
+        });
       }
 
       const dbId = (
         body.databaseId || ""
       )
         .toString()
-        .replace(/-/g, "")
+        .replace(
+          /-/g,
+          ""
+        )
         .trim();
 
       if (!dbId) {
-        return res
-          .status(400)
-          .json({
-            error:
-              "databaseId mancante"
-          });
+        return res.status(400).json({
+          error:
+            "databaseId mancante"
+        });
       }
 
       const dati =
@@ -1661,9 +1990,12 @@ export default async function handler(req, res) {
 
       try {
         const schema =
-          await notionSchema(dbId);
+          await notionSchema(
+            dbId
+          );
 
-        const props = {};
+        const props =
+          {};
 
         const map = [
           {
@@ -1673,45 +2005,57 @@ export default async function handler(req, res) {
               "Name"
             ],
             v:
-              dati.descrizione,
-            t: "title"
+              dati.descrizione
           },
+
           {
-            al: ["Tipo"],
-            v: dati.tipo,
-            t: "select"
+            al:
+              ["Tipo"],
+            v:
+              dati.tipo
           },
+
           {
-            al: ["Categoria"],
-            v: dati.categoria,
-            t: "select"
+            al:
+              ["Categoria"],
+            v:
+              dati.categoria
           },
+
           {
             al: [
               "Cliente",
               "Clienti"
             ],
-            v: dati.cliente,
-            t: "rich_text"
+            v:
+              dati.cliente
           },
+
           {
-            al: ["Importo"],
-            v: dati.importo,
-            t: "number"
+            al:
+              ["Importo"],
+            v:
+              dati.importo
           },
+
           {
-            al: ["Stato"],
-            v: dati.stato,
-            t: "select"
+            al:
+              ["Stato"],
+            v:
+              dati.stato
           },
+
           {
-            al: ["Data"],
-            v: dati.data,
-            t: "date"
+            al:
+              ["Data"],
+            v:
+              dati.data
           }
         ];
 
-        for (const m of map) {
+        for (
+          const m of map
+        ) {
           if (
             m.v == null ||
             m.v === ""
@@ -1733,7 +2077,8 @@ export default async function handler(req, res) {
             schema[key].type;
 
           if (
-            realType === "title"
+            realType ===
+            "title"
           ) {
             props[key] = {
               title: [
@@ -1750,7 +2095,9 @@ export default async function handler(req, res) {
                 }
               ]
             };
-          } else if (
+          }
+
+          else if (
             realType ===
             "rich_text"
           ) {
@@ -1769,8 +2116,11 @@ export default async function handler(req, res) {
                 }
               ]
             };
-          } else if (
-            realType === "select"
+          }
+
+          else if (
+            realType ===
+            "select"
           ) {
             props[key] = {
               select: {
@@ -1783,128 +2133,138 @@ export default async function handler(req, res) {
                   )
               }
             };
-          } else if (
-            realType === "number"
+          }
+
+          else if (
+            realType ===
+            "number"
           ) {
             props[key] = {
               number:
-                Number(m.v)
+                Number(
+                  m.v
+                )
             };
-          } else if (
-            realType === "date"
+          }
+
+          else if (
+            realType ===
+            "date"
           ) {
             props[key] = {
               date: {
                 start:
-                  String(m.v)
+                  String(
+                    m.v
+                  )
               }
             };
           }
         }
 
-        const r = await fetch(
-          "https://api.notion.com/v1/pages",
-          {
-            method: "POST",
+        const r =
+          await fetch(
+            "https://api.notion.com/v1/pages",
+            {
+              method:
+                "POST",
 
-            headers:
-              notionH(),
+              headers:
+                notionH(),
 
-            body:
-              JSON.stringify({
-                parent: {
-                  database_id:
-                    dbId
-                },
+              body:
+                JSON.stringify({
+                  parent: {
+                    database_id:
+                      dbId
+                  },
 
-                properties:
-                  props
-              })
-          }
-        );
+                  properties:
+                    props
+                })
+            }
+          );
 
         const d =
           await r.json();
 
         if (!r.ok) {
-          return res
-            .status(r.status)
-            .json({
-              error:
-                d?.message ||
-                "Errore creazione movimento"
-            });
+          return res.status(r.status).json({
+            error:
+              d?.message ||
+              "Errore creazione movimento"
+          });
         }
 
-        return res
-          .status(200)
-          .json({
-            ok: true,
-            url: d.url || null
-          });
+        return res.status(200).json({
+          ok: true,
+
+          url:
+            d.url ||
+            null
+        });
       } catch (e) {
-        return res
-          .status(500)
-          .json({
-            error: String(
+        return res.status(500).json({
+          error:
+            String(
               e.message || e
             )
-          });
+        });
       }
     }
 
     // ============================================================
     // NOTION — CREA RELAZIONE
     // ============================================================
+
     if (
-      body.action === "notion"
+      body.action ===
+      "notion"
     ) {
       if (
         !process.env.NOTION_TOKEN
       ) {
-        return res
-          .status(500)
-          .json({
-            error:
-              "NOTION_TOKEN mancante"
-          });
+        return res.status(500).json({
+          error:
+            "NOTION_TOKEN mancante"
+        });
       }
 
       const databaseId = (
         body.databaseId || ""
       )
         .toString()
-        .replace(/-/g, "")
+        .replace(
+          /-/g,
+          ""
+        )
         .trim();
 
       if (!databaseId) {
-        return res
-          .status(400)
-          .json({
-            error:
-              "databaseId mancante"
-          });
+        return res.status(400).json({
+          error:
+            "databaseId mancante"
+        });
       }
 
-      const dbr = await fetch(
-        `https://api.notion.com/v1/databases/${databaseId}`,
-        {
-          headers:
-            notionH()
-        }
-      );
+      const dbr =
+        await fetch(
+          `https://api.notion.com/v1/databases/${databaseId}`,
+          {
+            headers:
+              notionH()
+          }
+        );
 
       const db =
         await dbr.json();
 
       if (!dbr.ok) {
-        return res
-          .status(dbr.status)
-          .json({
-            error:
-              db?.message ||
-              "Errore lettura database Notion"
-          });
+        return res.status(dbr.status).json({
+          error:
+            db?.message ||
+            "Errore lettura database Notion"
+        });
       }
 
       let titleProp =
@@ -1918,7 +2278,8 @@ export default async function handler(req, res) {
       ) {
         if (
           v &&
-          v.type === "title"
+          v.type ===
+            "title"
         ) {
           titleProp = k;
           break;
@@ -1930,10 +2291,14 @@ export default async function handler(req, res) {
         "Relazione CORTEX"
       )
         .toString()
-        .slice(0, 200);
+        .slice(
+          0,
+          200
+        );
 
       const finalText = (
-        body.finalText || ""
+        body.finalText ||
+        ""
       ).toString();
 
       const sections =
@@ -1944,19 +2309,23 @@ export default async function handler(req, res) {
           : [];
 
       const h2 = (t) => ({
-        object: "block",
+        object:
+          "block",
 
-        type: "heading_2",
+        type:
+          "heading_2",
 
         heading_2: {
           rich_text: [
             {
-              type: "text",
+              type:
+                "text",
 
               text: {
                 content:
                   (
-                    t || ""
+                    t ||
+                    ""
                   )
                     .toString()
                     .slice(
@@ -1970,23 +2339,31 @@ export default async function handler(req, res) {
       });
 
       const para = (t) => ({
-        object: "block",
+        object:
+          "block",
 
-        type: "paragraph",
+        type:
+          "paragraph",
 
         paragraph: {
           rich_text:
-            chunkText(t)
+            chunkText(
+              t
+            )
         }
       });
 
       const children = [
-        h2("Sintesi CORTEX")
+        h2(
+          "Sintesi CORTEX"
+        )
       ];
 
       if (finalText) {
         children.push(
-          para(finalText)
+          para(
+            finalText
+          )
         );
       }
 
@@ -1995,19 +2372,24 @@ export default async function handler(req, res) {
       ) {
         children.push(
           h2(
-            (s.name ||
-              "Organo") +
-              (s.count
-                ? " (" +
-                  s.count +
-                  ")"
-                : "")
+            (
+              s.name ||
+              "Organo"
+            ) +
+              (
+                s.count
+                  ? " (" +
+                    s.count +
+                    ")"
+                  : ""
+              )
           )
         );
 
         children.push(
           para(
-            s.text || ""
+            s.text ||
+            ""
           )
         );
       }
@@ -2038,94 +2420,95 @@ export default async function handler(req, res) {
           )
       };
 
-      const pr = await fetch(
-        "https://api.notion.com/v1/pages",
-        {
-          method: "POST",
+      const pr =
+        await fetch(
+          "https://api.notion.com/v1/pages",
+          {
+            method:
+              "POST",
 
-          headers:
-            notionH(),
+            headers:
+              notionH(),
 
-          body:
-            JSON.stringify(
-              payload
-            )
-        }
-      );
+            body:
+              JSON.stringify(
+                payload
+              )
+          }
+        );
 
       const pd =
         await pr.json();
 
       if (!pr.ok) {
-        return res
-          .status(pr.status)
-          .json({
-            error:
-              pd?.message ||
-              "Errore creazione pagina Notion"
-          });
+        return res.status(pr.status).json({
+          error:
+            pd?.message ||
+            "Errore creazione pagina Notion"
+        });
       }
 
-      return res
-        .status(200)
-        .json({
-          ok: true,
-          url: pd.url || null
-        });
+      return res.status(200).json({
+        ok: true,
+
+        url:
+          pd.url ||
+          null
+      });
     }
 
     // ============================================================
-    // NOTION — LOG
+    // NOTION — SCRIVI LOG
     // ============================================================
+
     if (
-      body.action === "log"
+      body.action ===
+      "log"
     ) {
       if (
         !process.env.NOTION_TOKEN
       ) {
-        return res
-          .status(500)
-          .json({
-            error:
-              "NOTION_TOKEN mancante"
-          });
+        return res.status(500).json({
+          error:
+            "NOTION_TOKEN mancante"
+        });
       }
 
       const databaseId = (
         body.databaseId || ""
       )
         .toString()
-        .replace(/-/g, "")
+        .replace(
+          /-/g,
+          ""
+        )
         .trim();
 
       if (!databaseId) {
-        return res
-          .status(400)
-          .json({
-            error:
-              "databaseId mancante"
-          });
+        return res.status(400).json({
+          error:
+            "databaseId mancante"
+        });
       }
 
-      const dbr = await fetch(
-        `https://api.notion.com/v1/databases/${databaseId}`,
-        {
-          headers:
-            notionH()
-        }
-      );
+      const dbr =
+        await fetch(
+          `https://api.notion.com/v1/databases/${databaseId}`,
+          {
+            headers:
+              notionH()
+          }
+        );
 
       const db =
         await dbr.json();
 
       if (!dbr.ok) {
-        return res
-          .status(dbr.status)
-          .json({
-            error:
-              db?.message ||
-              "Errore lettura database Notion"
-          });
+        return res.status(dbr.status).json({
+          error:
+            db?.message ||
+            "Errore lettura database Notion"
+        });
       }
 
       let titleProp =
@@ -2150,17 +2533,26 @@ export default async function handler(req, res) {
         body.text || ""
       )
         .toString()
-        .slice(0, 1800);
+        .slice(
+          0,
+          1800
+        );
 
       const organo = (
         body.organo || ""
       ).toString();
 
       const title =
-        (organo
-          ? organo + ": "
-          : "") +
-        line.slice(0, 90);
+        (
+          organo
+            ? organo +
+              ": "
+            : ""
+        ) +
+        line.slice(
+          0,
+          90
+        );
 
       const payload = {
         parent: {
@@ -2184,9 +2576,11 @@ export default async function handler(req, res) {
 
         children: [
           {
-            object: "block",
+            object:
+              "block",
 
-            type: "paragraph",
+            type:
+              "paragraph",
 
             paragraph: {
               rich_text:
@@ -2198,44 +2592,43 @@ export default async function handler(req, res) {
         ]
       };
 
-      const pr = await fetch(
-        "https://api.notion.com/v1/pages",
-        {
-          method: "POST",
+      const pr =
+        await fetch(
+          "https://api.notion.com/v1/pages",
+          {
+            method:
+              "POST",
 
-          headers:
-            notionH(),
+            headers:
+              notionH(),
 
-          body:
-            JSON.stringify(
-              payload
-            )
-        }
-      );
+            body:
+              JSON.stringify(
+                payload
+              )
+          }
+        );
 
       const pd =
         await pr.json();
 
       if (!pr.ok) {
-        return res
-          .status(pr.status)
-          .json({
-            error:
-              pd?.message ||
-              "Errore log Notion"
-          });
+        return res.status(pr.status).json({
+          error:
+            pd?.message ||
+            "Errore log Notion"
+        });
       }
 
-      return res
-        .status(200)
-        .json({
-          ok: true
-        });
+      return res.status(200).json({
+        ok: true
+      });
     }
 
     // ============================================================
-    // NOTION — LEGGI LOG DI OGGI
+    // NOTION — LEGGI LOG
     // ============================================================
+
     if (
       body.action ===
       "log_read"
@@ -2243,28 +2636,27 @@ export default async function handler(req, res) {
       if (
         !process.env.NOTION_TOKEN
       ) {
-        return res
-          .status(500)
-          .json({
-            error:
-              "NOTION_TOKEN mancante"
-          });
+        return res.status(500).json({
+          error:
+            "NOTION_TOKEN mancante"
+        });
       }
 
       const databaseId = (
         body.databaseId || ""
       )
         .toString()
-        .replace(/-/g, "")
+        .replace(
+          /-/g,
+          ""
+        )
         .trim();
 
       if (!databaseId) {
-        return res
-          .status(400)
-          .json({
-            error:
-              "databaseId mancante"
-          });
+        return res.status(400).json({
+          error:
+            "databaseId mancante"
+        });
       }
 
       const since =
@@ -2277,102 +2669,115 @@ export default async function handler(req, res) {
         0
       );
 
-      const pr = await fetch(
-        `https://api.notion.com/v1/databases/${databaseId}/query`,
-        {
-          method: "POST",
+      const pr =
+        await fetch(
+          `https://api.notion.com/v1/databases/${databaseId}/query`,
+          {
+            method:
+              "POST",
 
-          headers:
-            notionH(),
+            headers:
+              notionH(),
 
-          body:
-            JSON.stringify({
-              filter: {
-                timestamp:
-                  "created_time",
+            body:
+              JSON.stringify({
+                filter: {
+                  timestamp:
+                    "created_time",
 
-                created_time: {
-                  on_or_after:
-                    since.toISOString()
-                }
-              },
+                  created_time: {
+                    on_or_after:
+                      since.toISOString()
+                  }
+                },
 
-              page_size: 100
-            })
-        }
-      );
+                page_size:
+                  100
+              })
+          }
+        );
 
       const pd =
         await pr.json();
 
       if (!pr.ok) {
-        return res
-          .status(pr.status)
-          .json({
-            error:
-              pd?.message ||
-              "Errore lettura log"
-          });
+        return res.status(pr.status).json({
+          error:
+            pd?.message ||
+            "Errore lettura log"
+        });
       }
 
       const items = (
-        pd.results || []
+        pd.results ||
+        []
       )
-        .map((p) => {
-          const props =
-            p.properties || {};
+        .map(
+          (p) => {
+            const props =
+              p.properties ||
+              {};
 
-          let title = "";
+            let title =
+              "";
 
-          for (
-            const v of
-            Object.values(props)
-          ) {
-            if (
-              v.type ===
-              "title"
-            ) {
-              title = (
-                v.title || []
+            for (
+              const v of
+              Object.values(
+                props
               )
-                .map(
-                  (t) =>
-                    t.plain_text
-                )
-                .join("");
+            ) {
+              if (
+                v.type ===
+                "title"
+              ) {
+                title =
+                  (
+                    v.title ||
+                    []
+                  )
+                    .map(
+                      (t) =>
+                        t.plain_text
+                    )
+                    .join(
+                      ""
+                    );
 
-              break;
+                break;
+              }
             }
+
+            return title;
           }
+        )
+        .filter(
+          Boolean
+        );
 
-          return title;
-        })
-        .filter(Boolean);
-
-      return res
-        .status(200)
-        .json({
-          items
-        });
+      return res.status(200).json({
+        items
+      });
     }
 
     // ============================================================
-    // CHAT GEMINI — AGENTI
+    // GEMINI — CHAT DEGLI AGENTI
     // ============================================================
+
     const {
       system,
       messages
     } = body;
 
     if (
-      !Array.isArray(messages)
+      !Array.isArray(
+        messages
+      )
     ) {
-      return res
-        .status(400)
-        .json({
-          error:
-            "messages mancante"
-        });
+      return res.status(400).json({
+        error:
+          "messages mancante"
+      });
     }
 
     const key =
@@ -2380,101 +2785,116 @@ export default async function handler(req, res) {
         .GEMINI_API_KEY;
 
     if (!key) {
-      return res
-        .status(500)
-        .json({
-          error:
-            "GEMINI_API_KEY mancante"
-        });
+      return res.status(500).json({
+        error:
+          "GEMINI_API_KEY mancante"
+      });
     }
 
     const contents =
-      messages.map((m) => {
-        const role =
-          m.role ===
-          "assistant"
-            ? "model"
-            : "user";
+      messages.map(
+        (m) => {
+          const role =
+            m.role ===
+            "assistant"
+              ? "model"
+              : "user";
 
-        const parts = [];
+          const parts =
+            [];
 
-        if (
-          typeof m.content ===
-          "string"
-        ) {
-          parts.push({
-            text: m.content
-          });
-        } else if (
-          Array.isArray(
-            m.content
-          )
-        ) {
-          for (
-            const b of
-            m.content
+          if (
+            typeof m.content ===
+            "string"
           ) {
-            if (
-              b.type ===
-              "text"
-            ) {
-              parts.push({
-                text: b.text
-              });
-            } else if (
-              b.type ===
-                "image" &&
-              b.source?.data
-            ) {
-              parts.push({
-                inline_data: {
-                  mime_type:
-                    b.source
-                      .media_type ||
-                    "image/jpeg",
+            parts.push({
+              text:
+                m.content
+            });
+          }
 
-                  data:
-                    b.source
-                      .data
-                }
-              });
-            } else if (
-              b.type ===
-                "document" &&
-              b.source?.data
+          else if (
+            Array.isArray(
+              m.content
+            )
+          ) {
+            for (
+              const b of
+              m.content
             ) {
-              parts.push({
-                inline_data: {
-                  mime_type:
-                    "application/pdf",
+              if (
+                b.type ===
+                "text"
+              ) {
+                parts.push({
+                  text:
+                    b.text
+                });
+              }
 
-                  data:
-                    b.source
-                      .data
-                }
-              });
+              else if (
+                b.type ===
+                  "image" &&
+                b.source?.data
+              ) {
+                parts.push({
+                  inline_data: {
+                    mime_type:
+                      b.source
+                        .media_type ||
+                      "image/jpeg",
+
+                    data:
+                      b.source
+                        .data
+                  }
+                });
+              }
+
+              else if (
+                b.type ===
+                  "document" &&
+                b.source?.data
+              ) {
+                parts.push({
+                  inline_data: {
+                    mime_type:
+                      "application/pdf",
+
+                    data:
+                      b.source
+                        .data
+                  }
+                });
+              }
             }
           }
-        }
 
-        if (!parts.length) {
-          parts.push({
-            text: ""
-          });
-        }
+          if (
+            !parts.length
+          ) {
+            parts.push({
+              text:
+                ""
+            });
+          }
 
-        return {
-          role,
-          parts
-        };
-      });
+          return {
+            role,
+            parts
+          };
+        }
+      );
 
     const gbody = {
       contents,
 
       generationConfig: {
-        maxOutputTokens: 8192,
-        temperature: 0.7
+        maxOutputTokens:
+          8192,
+
+        temperature:
+          0.7
       }
     };
 
@@ -2482,7 +2902,8 @@ export default async function handler(req, res) {
       gbody.systemInstruction = {
         parts: [
           {
-            text: system
+            text:
+              system
           }
         ]
       };
@@ -2491,67 +2912,70 @@ export default async function handler(req, res) {
     const url =
       `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${key}`;
 
-    const r = await fetch(
-      url,
-      {
-        method: "POST",
+    const r =
+      await fetch(
+        url,
+        {
+          method:
+            "POST",
 
-        headers: {
-          "content-type":
-            "application/json"
-        },
+          headers: {
+            "content-type":
+              "application/json"
+          },
 
-        body:
-          JSON.stringify(
-            gbody
-          )
-      }
-    );
+          body:
+            JSON.stringify(
+              gbody
+            )
+        }
+      );
 
     const data =
       await r.json();
 
     if (!r.ok) {
-      return res
-        .status(r.status)
-        .json({
-          error:
-            data?.error
-              ?.message ||
-            "Errore Gemini"
-        });
+      return res.status(r.status).json({
+        error:
+          data?.error
+            ?.message ||
+          "Errore Gemini"
+      });
     }
 
-    const text = (
-      data?.candidates?.[0]
-        ?.content?.parts || []
-    )
-      .map(
-        (p) => p.text || ""
+    const text =
+      (
+        data?.candidates?.[0]
+          ?.content?.parts ||
+        []
       )
-      .join("")
-      .trim();
+        .map(
+          (p) =>
+            p.text ||
+            ""
+        )
+        .join("")
+        .trim();
 
-    return res
-      .status(200)
-      .json({
-        content: [
-          {
-            type: "text",
-            text
-          }
-        ]
-      });
+    return res.status(200).json({
+      content: [
+        {
+          type:
+            "text",
+
+          text
+        }
+      ]
+    });
   } catch (e) {
-    return res
-      .status(500)
-      .json({
-        error: String(
+    return res.status(500).json({
+      error:
+        String(
           e &&
             e.message
             ? e.message
             : e
         )
-      });
+    });
   }
 }
