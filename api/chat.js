@@ -119,6 +119,42 @@ export default async function handler(req, res) {
       });
     }
 
+    // --- NERVUS: dati di mercato (Binance per crypto, Twelve Data per forex/azioni) ---
+    if (body.action === "market") {
+      const symbol = (body.symbol || "").toString().trim().toUpperCase();
+      if (!symbol) return res.status(400).json({ error: "symbol mancante" });
+      // Se finisce in USDT/BTC/ETH/BUSD -> crypto Binance (live, senza key)
+      const isCrypto = /USDT$|BUSD$|BTC$|ETH$/.test(symbol.replace(/[^A-Z]/g, ""));
+      try {
+        if (isCrypto) {
+          const s = symbol.replace(/[^A-Z]/g, "");
+          const [t24, kl] = await Promise.all([
+            fetch("https://api.binance.com/api/v3/ticker/24hr?symbol=" + s).then(r => r.json()),
+            fetch("https://api.binance.com/api/v3/klines?symbol=" + s + "&interval=1h&limit=24").then(r => r.json())
+          ]);
+          if (t24.code) return res.status(400).json({ error: "Simbolo crypto non valido su Binance: " + s });
+          const closes = Array.isArray(kl) ? kl.map(c => Number(c[4])) : [];
+          return res.status(200).json({
+            ok: true, source: "Binance (live)", symbol: s,
+            price: Number(t24.lastPrice), changePct: Number(t24.priceChangePercent),
+            high24h: Number(t24.highPrice), low24h: Number(t24.lowPrice), volume: Number(t24.volume),
+            closes1h: closes
+          });
+        } else {
+          const key = process.env.TWELVEDATA_API_KEY;
+          if (!key) return res.status(500).json({ error: "TWELVEDATA_API_KEY mancante" });
+          const q = await fetch("https://api.twelvedata.com/quote?symbol=" + encodeURIComponent(symbol) + "&apikey=" + key).then(r => r.json());
+          if (q.status === "error" || q.code) return res.status(400).json({ error: q.message || "Simbolo non trovato su Twelve Data" });
+          return res.status(200).json({
+            ok: true, source: "Twelve Data (ritardato ~ore)", symbol,
+            price: Number(q.close), changePct: Number(q.percent_change),
+            high24h: Number(q.high), low24h: Number(q.low), volume: q.volume ? Number(q.volume) : null,
+            name: q.name || null, exchange: q.exchange || null
+          });
+        }
+      } catch (e) { return res.status(500).json({ error: String(e.message || e) }); }
+    }
+
     // --- RICERCA ATTIVITA' GOOGLE PLACES (per OCULUS) ---
     if (body.action === "places") {
       const gk = process.env.PLACES_API_KEY;
