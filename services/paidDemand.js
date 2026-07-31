@@ -1,22 +1,30 @@
 // services/paidDemand.js
 //
-// OCULUS — PAID DEMAND ENGINE
+// OCULUS — MOTORE DOMANDA ATTIVA
 //
-// Versione FREE:
-// - NON usa Google Search Grounding
-// - NON richiede credito Google
-// - usa fonti pubbliche gratuite
+// VERSIONE GRATUITA
 //
-// Fonti iniziali:
+// Fonti:
 // 1. Remote OK
 // 2. Remotive
+// 3. Himalayas
 //
-// Gemini viene usato SOLO per classificare e valutare i risultati,
-// non per cercarli sul web.
+// Nessuna delle tre richiede pagamento o API key.
+//
+// Gemini viene usato solo come classificatore,
+// non come motore di ricerca web.
+//
+// Obiettivo:
+// trovare richieste REALI compatibili con le capacità di CORTEX.
 
 const ANALYSIS_MODEL =
   process.env.GEMINI_MODEL ||
   "gemini-3.5-flash-lite";
+
+
+// ============================================================
+// UTILITY
+// ============================================================
 
 function stripHtml(text) {
   return (text || "")
@@ -28,6 +36,7 @@ function stripHtml(text) {
     .trim();
 }
 
+
 function normalize(text) {
   return (text || "")
     .toString()
@@ -36,6 +45,7 @@ function normalize(text) {
     .replace(/[\u0300-\u036f]/g, "")
     .trim();
 }
+
 
 function matchesQuery(job, query) {
   const q = normalize(query);
@@ -67,6 +77,11 @@ function matchesQuery(job, query) {
   );
 }
 
+
+// ============================================================
+// REMOTE OK
+// ============================================================
+
 async function fetchRemoteOK() {
   try {
     const response = await fetch(
@@ -74,7 +89,7 @@ async function fetchRemoteOK() {
       {
         headers: {
           "User-Agent":
-            "CORTEX/1.0 (+https://cortex.local)"
+            "CORTEX/1.0"
         }
       }
     );
@@ -94,7 +109,6 @@ async function fetchRemoteOK() {
       return [];
     }
 
-    // Il primo elemento può essere metadata/licenza.
     return data
       .filter(
         (item) =>
@@ -103,7 +117,8 @@ async function fetchRemoteOK() {
           item.url
       )
       .map((item) => ({
-        source: "Remote OK",
+        source:
+          "Remote OK",
 
         title:
           item.position || "",
@@ -115,9 +130,10 @@ async function fetchRemoteOK() {
           item.company || null,
 
         location:
-          item.location || "Remote",
+          item.location || "Da remoto",
 
-        remote: true,
+        remote:
+          true,
 
         url:
           item.url || null,
@@ -127,7 +143,8 @@ async function fetchRemoteOK() {
             item.description || ""
           ).slice(0, 1800),
 
-        category: null,
+        category:
+          null,
 
         tags:
           Array.isArray(item.tags)
@@ -146,6 +163,7 @@ async function fetchRemoteOK() {
         publishedAt:
           item.date || null
       }));
+
   } catch (error) {
     console.error(
       "[OCULUS / RemoteOK error]",
@@ -156,6 +174,11 @@ async function fetchRemoteOK() {
   }
 }
 
+
+// ============================================================
+// REMOTIVE
+// ============================================================
+
 async function fetchRemotive(query) {
   try {
     const url =
@@ -164,7 +187,8 @@ async function fetchRemotive(query) {
       encodeURIComponent(query || "") +
       "&limit=50";
 
-    const response = await fetch(url);
+    const response =
+      await fetch(url);
 
     if (!response.ok) {
       console.error(
@@ -175,7 +199,8 @@ async function fetchRemotive(query) {
       return [];
     }
 
-    const data = await response.json();
+    const data =
+      await response.json();
 
     const jobs =
       Array.isArray(data?.jobs)
@@ -183,7 +208,8 @@ async function fetchRemotive(query) {
         : [];
 
     return jobs.map((item) => ({
-      source: "Remotive",
+      source:
+        "Remotive",
 
       title:
         item.title || "",
@@ -196,9 +222,10 @@ async function fetchRemotive(query) {
 
       location:
         item.candidate_required_location ||
-        "Remote",
+        "Da remoto",
 
-      remote: true,
+      remote:
+        true,
 
       url:
         item.url || null,
@@ -219,14 +246,19 @@ async function fetchRemotive(query) {
       salary:
         item.salary || null,
 
-      salaryMin: null,
-      salaryMax: null,
+      salaryMin:
+        null,
 
-      currency: null,
+      salaryMax:
+        null,
+
+      currency:
+        null,
 
       publishedAt:
         item.publication_date || null
     }));
+
   } catch (error) {
     console.error(
       "[OCULUS / Remotive error]",
@@ -237,16 +269,166 @@ async function fetchRemotive(query) {
   }
 }
 
-function removeDuplicates(items) {
-  const seen = new Set();
 
-  return items.filter((item) => {
-    const key =
-      normalize(
-        `${item.source}|${item.url}|${item.title}|${item.company}`
+// ============================================================
+// HIMALAYAS
+// ============================================================
+
+async function fetchHimalayas(query) {
+  try {
+    const url =
+      "https://himalayas.app/jobs/api" +
+      "?limit=20" +
+      "&q=" +
+      encodeURIComponent(query || "");
+
+    const response =
+      await fetch(url);
+
+    if (!response.ok) {
+      console.error(
+        "[OCULUS / Himalayas]",
+        response.status
       );
 
-    if (!key || seen.has(key)) {
+      return [];
+    }
+
+    const data =
+      await response.json();
+
+    const jobs =
+      Array.isArray(data?.jobs)
+        ? data.jobs
+        : Array.isArray(data)
+        ? data
+        : [];
+
+    return jobs
+      .filter(
+        (item) =>
+          item &&
+          item.title
+      )
+      .map((item) => {
+
+        const company =
+          item.company?.name ||
+          item.companyName ||
+          item.company ||
+          null;
+
+        const url =
+          item.applicationUrl ||
+          item.url ||
+          item.jobUrl ||
+          null;
+
+        const locations =
+          Array.isArray(
+            item.locationRestrictions
+          )
+            ? item.locationRestrictions
+                .join(", ")
+            : item.location ||
+              "Da remoto";
+
+        return {
+          source:
+            "Himalayas",
+
+          title:
+            item.title || "",
+
+          client:
+            company,
+
+          company,
+
+          location:
+            locations,
+
+          remote:
+            true,
+
+          url,
+
+          description:
+            stripHtml(
+              item.description ||
+              item.excerpt ||
+              ""
+            ).slice(0, 1800),
+
+          category:
+            item.category ||
+            null,
+
+          tags:
+            Array.isArray(item.skills)
+              ? item.skills
+              : Array.isArray(item.tags)
+              ? item.tags
+              : [],
+
+          salaryMin:
+            Number(
+              item.minSalary ||
+              item.salaryMin
+            ) || null,
+
+          salaryMax:
+            Number(
+              item.maxSalary ||
+              item.salaryMax
+            ) || null,
+
+          currency:
+            item.currency ||
+            item.salaryCurrency ||
+            null,
+
+          publishedAt:
+            item.publishedAt ||
+            item.createdAt ||
+            null
+        };
+      })
+      .filter(
+        (item) =>
+          item.url
+      );
+
+  } catch (error) {
+    console.error(
+      "[OCULUS / Himalayas error]",
+      error
+    );
+
+    return [];
+  }
+}
+
+
+// ============================================================
+// DEDUPLICAZIONE
+// ============================================================
+
+function removeDuplicates(items) {
+  const seen =
+    new Set();
+
+  return items.filter((item) => {
+
+    const key =
+      normalize(
+        `${item.url}|${item.title}|${item.company}`
+      );
+
+    if (
+      !key ||
+      seen.has(key)
+    ) {
       return false;
     }
 
@@ -256,31 +438,49 @@ function removeDuplicates(items) {
   });
 }
 
+
+// ============================================================
+// SCORING LOCALE
+// ============================================================
+
 function simpleScore(job, query) {
-  const text = normalize(
-    [
-      job.title,
-      job.description,
-      job.tags?.join(" "),
-      job.category
-    ]
-      .filter(Boolean)
-      .join(" ")
-  );
+  const text =
+    normalize(
+      [
+        job.title,
+        job.description,
+        job.tags?.join(" "),
+        job.category
+      ]
+        .filter(Boolean)
+        .join(" ")
+    );
 
-  const qWords = normalize(query)
-    .split(/\s+/)
-    .filter((w) => w.length > 2);
+  const qWords =
+    normalize(query)
+      .split(/\s+/)
+      .filter(
+        (w) =>
+          w.length > 2
+      );
 
-  let fitScore = 45;
 
-  for (const word of qWords) {
-    if (text.includes(word)) {
+  let fitScore =
+    40;
+
+
+  for (
+    const word of qWords
+  ) {
+    if (
+      text.includes(word)
+    ) {
       fitScore += 8;
     }
   }
 
-  const digitalKeywords = [
+
+  const cortexSkills = [
     "shopify",
     "ecommerce",
     "e-commerce",
@@ -288,30 +488,46 @@ function simpleScore(job, query) {
     "web",
     "wordpress",
     "webflow",
+    "frontend",
     "developer",
     "design",
     "marketing",
     "social",
     "content",
     "automation",
-    "ai",
     "artificial intelligence",
+    " ai ",
     "saas",
     "landing",
     "seo",
     "video",
-    "branding"
+    "branding",
+    "copywriting"
   ];
 
-  for (const keyword of digitalKeywords) {
-    if (text.includes(keyword)) {
+
+  for (
+    const keyword of
+    cortexSkills
+  ) {
+    if (
+      text.includes(keyword)
+    ) {
       fitScore += 2;
     }
   }
 
-  fitScore = Math.min(100, fitScore);
 
-  let automationScore = 40;
+  fitScore =
+    Math.min(
+      100,
+      fitScore
+    );
+
+
+  let automationScore =
+    35;
+
 
   const automationFriendly = [
     "website",
@@ -325,33 +541,52 @@ function simpleScore(job, query) {
     "social",
     "marketing",
     "automation",
-    "ai",
+    "artificial intelligence",
     "chatbot",
     "design",
-    "landing"
+    "landing",
+    "ecommerce",
+    "e-commerce"
   ];
 
-  for (const keyword of automationFriendly) {
-    if (text.includes(keyword)) {
+
+  for (
+    const keyword of
+    automationFriendly
+  ) {
+    if (
+      text.includes(keyword)
+    ) {
       automationScore += 4;
     }
   }
 
-  automationScore =
-    Math.min(95, automationScore);
 
-  let priority = "LOW";
+  automationScore =
+    Math.min(
+      95,
+      automationScore
+    );
+
+
+  let priority =
+    "BASSA";
+
 
   if (
     fitScore >= 80 &&
     automationScore >= 65
   ) {
-    priority = "HIGH";
+    priority =
+      "ALTA";
+
   } else if (
     fitScore >= 60
   ) {
-    priority = "MEDIUM";
+    priority =
+      "MEDIA";
   }
+
 
   return {
     fitScore,
@@ -360,38 +595,56 @@ function simpleScore(job, query) {
   };
 }
 
+
+// ============================================================
+// GEMINI — SOLO CLASSIFICAZIONE
+// ============================================================
+
 async function analyzeWithGemini(
   jobs,
   query
 ) {
   const key =
-    process.env.GEMINI_API_KEY;
+    process.env
+      .GEMINI_API_KEY;
 
-  if (!key || !jobs.length) {
+
+  if (
+    !key ||
+    !jobs.length
+  ) {
     return null;
   }
 
-  const compactJobs = jobs
-    .slice(0, 20)
-    .map((job, index) => ({
-      index,
 
-      title:
-        job.title,
+  const compactJobs =
+    jobs
+      .slice(0, 20)
+      .map(
+        (job, index) => ({
+          index,
 
-      company:
-        job.company,
+          title:
+            job.title,
 
-      source:
-        job.source,
+          company:
+            job.company,
 
-      description:
-        job.description
-          .slice(0, 700),
+          source:
+            job.source,
 
-      tags:
-        job.tags
-    }));
+          description:
+            job.description
+              .slice(
+                0,
+                700
+              ),
+
+          tags:
+            job.tags
+        })
+      );
+
 
   const prompt = `
 Sei OCULUS, analista commerciale di CORTEX.
@@ -400,117 +653,157 @@ L'utente cerca opportunità per:
 
 "${query}"
 
-Qui sotto trovi offerte REALI recuperate da API pubbliche.
+Le offerte seguenti sono REALI e provengono da API pubbliche.
 
-Valuta SOLTANTO queste offerte.
-NON inventare nuove offerte.
+NON inventare nuove opportunità.
 
-Per ogni indice restituisci:
+Valuta ogni offerta in base alla capacità di CORTEX di svolgere il lavoro.
 
-- fitScore da 0 a 100
-- automationScore da 0 a 100
-- priority: HIGH, MEDIUM o LOW
-- reason: massimo 20 parole in italiano
+CORTEX è forte in:
 
-Considera CORTEX particolarmente forte in:
-- sviluppo siti web
-- Shopify
+- sviluppo siti
 - e-commerce
+- Shopify
 - WordPress
+- Webflow
 - landing page
 - web app
-- AI e automazioni
+- AI
+- automazioni
+- chatbot
 - marketing digitale
 - social media
-- contenuti
+- content creation
 - branding
+- SEO
 - video
 - prodotti digitali
 
-JSON PURO:
+Restituisci:
+
+compatibilita:
+0-100
+
+automatizzabilita:
+0-100
+
+priorita:
+ALTA
+MEDIA
+BASSA
+
+motivazione:
+massimo 25 parole in italiano.
+
+Rispondi SOLO JSON:
 
 {
   "results": [
     {
       "index": 0,
-      "fitScore": 0,
-      "automationScore": 0,
-      "priority": "LOW",
-      "reason": ""
+      "compatibilita": 0,
+      "automatizzabilita": 0,
+      "priorita": "BASSA",
+      "motivazione": ""
     }
   ]
 }
 
-OFFERS:
+OPPORTUNITA:
+
 ${JSON.stringify(compactJobs)}
 `;
+
 
   try {
     const url =
       `https://generativelanguage.googleapis.com/v1beta/models/${ANALYSIS_MODEL}:generateContent?key=${key}`;
 
+
     const response =
-      await fetch(url, {
-        method: "POST",
+      await fetch(
+        url,
+        {
+          method:
+            "POST",
 
-        headers: {
-          "Content-Type":
-            "application/json"
-        },
-
-        body: JSON.stringify({
-          contents: [
-            {
-              role: "user",
-              parts: [
-                {
-                  text: prompt
-                }
-              ]
-            }
-          ],
-
-          generationConfig: {
-            temperature: 0.1,
-            maxOutputTokens: 4096,
-            responseMimeType:
+          headers: {
+            "Content-Type":
               "application/json"
-          }
-        })
-      });
+          },
+
+          body:
+            JSON.stringify({
+              contents: [
+                {
+                  role:
+                    "user",
+
+                  parts: [
+                    {
+                      text:
+                        prompt
+                    }
+                  ]
+                }
+              ],
+
+              generationConfig: {
+                temperature:
+                  0.1,
+
+                maxOutputTokens:
+                  4096,
+
+                responseMimeType:
+                  "application/json"
+              }
+            })
+        }
+      );
+
 
     const data =
       await response.json();
 
+
     if (!response.ok) {
       console.error(
-        "[OCULUS / Gemini analysis]",
+        "[OCULUS / Gemini]",
         data
       );
 
       return null;
     }
 
+
     const raw =
       (
-        data?.candidates?.[0]
-          ?.content?.parts || []
+        data
+          ?.candidates?.[0]
+          ?.content?.parts ||
+        []
       )
         .map(
           (part) =>
-            part.text || ""
+            part.text ||
+            ""
         )
         .join("")
         .trim();
+
 
     if (!raw) {
       return null;
     }
 
+
     return JSON.parse(raw);
+
   } catch (error) {
+
     console.error(
-      "[OCULUS / Gemini analysis error]",
+      "[OCULUS / Gemini error]",
       error
     );
 
@@ -518,25 +811,37 @@ ${JSON.stringify(compactJobs)}
   }
 }
 
+
+// ============================================================
+// HANDLER PRINCIPALE
+// ============================================================
+
 export async function searchPaidDemand(
   body,
   res
 ) {
-  const service = (
-    body.service ||
-    body.query ||
-    ""
-  )
-    .toString()
-    .trim()
-    .slice(0, 300);
+
+  const service =
+    (
+      body.service ||
+      body.query ||
+      ""
+    )
+      .toString()
+      .trim()
+      .slice(
+        0,
+        300
+      );
+
 
   if (!service) {
     return res.status(400).json({
       error:
-        "service/query mancante"
+        "Servizio o ricerca mancante"
     });
   }
+
 
   const maxResults =
     Math.min(
@@ -549,24 +854,49 @@ export async function searchPaidDemand(
       20
     );
 
+
   try {
+
+    // ----------------------------------------------------------
+    // Ricerca parallela sulle 3 fonti
+    // ----------------------------------------------------------
+
     const [
       remoteOK,
-      remotive
+      remotive,
+      himalayas
     ] =
       await Promise.all([
         fetchRemoteOK(),
-        fetchRemotive(service)
+        fetchRemotive(
+          service
+        ),
+        fetchHimalayas(
+          service
+        )
       ]);
 
-    let jobs =
-      [
-        ...remoteOK,
-        ...remotive
-      ];
+
+    let jobs = [
+      ...remoteOK,
+      ...remotive,
+      ...himalayas
+    ];
+
+
+    // ----------------------------------------------------------
+    // Deduplicazione
+    // ----------------------------------------------------------
 
     jobs =
-      removeDuplicates(jobs);
+      removeDuplicates(
+        jobs
+      );
+
+
+    // ----------------------------------------------------------
+    // Filtro per ricerca
+    // ----------------------------------------------------------
 
     jobs =
       jobs.filter(
@@ -578,20 +908,32 @@ export async function searchPaidDemand(
           )
       );
 
-    // Pre-score locale gratuito
-    jobs =
-      jobs.map((job) => {
-        const score =
-          simpleScore(
-            job,
-            service
-          );
 
-        return {
-          ...job,
-          ...score
-        };
-      });
+    // ----------------------------------------------------------
+    // Scoring locale
+    // ----------------------------------------------------------
+
+    jobs =
+      jobs.map(
+        (job) => {
+
+          const score =
+            simpleScore(
+              job,
+              service
+            );
+
+          return {
+            ...job,
+            ...score
+          };
+        }
+      );
+
+
+    // ----------------------------------------------------------
+    // Primo ordinamento
+    // ----------------------------------------------------------
 
     jobs.sort(
       (a, b) =>
@@ -609,35 +951,45 @@ export async function searchPaidDemand(
         )
     );
 
+
     jobs =
       jobs.slice(
         0,
         Math.max(
           maxResults,
-          15
+          20
         )
       );
 
-    // Gemini classifica le offerte REALI.
-    // Se Gemini non risponde, il sistema continua comunque
-    // usando gli score locali.
+
+    // ----------------------------------------------------------
+    // Analisi Gemini
+    // ----------------------------------------------------------
+
     const aiAnalysis =
       await analyzeWithGemini(
         jobs,
         service
       );
 
+
     if (
       Array.isArray(
-        aiAnalysis?.results
+        aiAnalysis
+          ?.results
       )
     ) {
+
       for (
         const ai of
         aiAnalysis.results
       ) {
+
         const index =
-          Number(ai.index);
+          Number(
+            ai.index
+          );
+
 
         if (
           !Number.isInteger(
@@ -648,16 +1000,22 @@ export async function searchPaidDemand(
           continue;
         }
 
-        jobs[index].fitScore =
+
+        jobs[
+          index
+        ].fitScore =
           Math.min(
             100,
             Math.max(
               0,
               Number(
-                ai.fitScore
-              ) || 0
+                ai.compatibilita
+              ) ||
+                jobs[index]
+                  .fitScore
             )
           );
+
 
         jobs[
           index
@@ -667,55 +1025,78 @@ export async function searchPaidDemand(
             Math.max(
               0,
               Number(
-                ai.automationScore
-              ) || 0
+                ai.automatizzabilita
+              ) ||
+                jobs[index]
+                  .automationScore
             )
           );
 
-        jobs[index].priority =
-          [
-            "HIGH",
-            "MEDIUM",
-            "LOW"
-          ].includes(
-            ai.priority
-          )
-            ? ai.priority
-            : jobs[index]
-                .priority;
 
-        jobs[index].reason =
-          ai.reason || "";
+        if (
+          [
+            "ALTA",
+            "MEDIA",
+            "BASSA"
+          ].includes(
+            ai.priorita
+          )
+        ) {
+          jobs[
+            index
+          ].priority =
+            ai.priorita;
+        }
+
+
+        jobs[
+          index
+        ].reason =
+          ai.motivazione ||
+          "";
       }
     }
 
+
+    // ----------------------------------------------------------
+    // Ordinamento definitivo
+    // ----------------------------------------------------------
+
+    const priorityValue = {
+      ALTA: 3,
+      MEDIA: 2,
+      BASSA: 1
+    };
+
+
     jobs.sort(
       (a, b) => {
-        const priorities = {
-          HIGH: 3,
-          MEDIUM: 2,
-          LOW: 1
-        };
 
         const scoreA =
           a.fitScore *
             0.6 +
           a.automationScore *
             0.4 +
-          priorities[
-            a.priority
-          ] *
+          (
+            priorityValue[
+              a.priority
+            ] || 0
+          ) *
             5;
+
 
         const scoreB =
           b.fitScore *
             0.6 +
           b.automationScore *
             0.4 +
-          priorities[
-            b.priority
-          ] *
+          (
+            priorityValue[
+              b.priority
+            ] || 0
+          ) *
             5;
+
 
         return (
           scoreB -
@@ -723,6 +1104,11 @@ export async function searchPaidDemand(
         );
       }
     );
+
+
+    // ----------------------------------------------------------
+    // Output finale in italiano
+    // ----------------------------------------------------------
 
     const results =
       jobs
@@ -735,9 +1121,11 @@ export async function searchPaidDemand(
             job,
             index
           ) => {
+
             let budget =
               job.salary ||
               null;
+
 
             if (
               !budget &&
@@ -746,6 +1134,7 @@ export async function searchPaidDemand(
                 job.salaryMax
               )
             ) {
+
               budget =
                 `${
                   job.salaryMin ||
@@ -756,100 +1145,112 @@ export async function searchPaidDemand(
                 }`;
             }
 
-            return {
-              id:
-                `PD-${Date.now()}-${index + 1}`,
 
-              title:
+            return {
+
+              id:
+                `OC-${Date.now()}-${index + 1}`,
+
+              titolo:
                 job.title ||
                 "Opportunità",
 
-              client:
+              cliente:
                 job.client ||
                 null,
 
-              service:
+              servizio:
                 service,
 
               budget,
 
-              currency:
+              valuta:
                 job.currency ||
                 null,
 
-              location:
+              localita:
                 job.location ||
                 null,
 
-              remote:
+              remoto:
                 job.remote !==
                 false,
 
-              source:
+              fonte:
                 job.source,
 
               url:
                 job.url,
 
-              description:
+              descrizione:
                 job.description
                   .slice(
                     0,
                     600
                   ),
 
-              fitScore:
+              compatibilita:
                 job.fitScore,
 
-              automationScore:
+              automatizzabilita:
                 job.automationScore,
 
-              priority:
+              priorita:
                 job.priority,
 
-              reason:
+              motivazione:
                 job.reason ||
                 "Opportunità compatibile con le capacità digitali di CORTEX.",
 
-              publishedAt:
+              pubblicataIl:
                 job.publishedAt ||
                 null
             };
           }
         );
 
+
     return res.status(200).json({
-      ok: true,
 
-      mode:
-        "paid_demand",
+      ok:
+        true,
 
-      engine:
-        "free_public_sources",
+      modalita:
+        "domanda_attiva",
 
-      query:
+      motore:
+        "fonti_pubbliche_gratuite",
+
+      ricerca:
         service,
 
-      count:
+      numeroRisultati:
         results.length,
 
-      sources: [
+      fonti: [
         "Remote OK",
-        "Remotive"
+        "Remotive",
+        "Himalayas"
       ],
 
       results
     });
+
+
   } catch (error) {
+
     console.error(
-      "[OCULUS / Paid Demand]",
+      "[OCULUS / Domanda Attiva]",
       error
     );
 
+
     return res.status(500).json({
+
       error:
         error?.message ||
-        "Errore durante Paid Demand"
+        "Errore durante la ricerca della domanda attiva"
+
     });
   }
 }
