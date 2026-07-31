@@ -300,6 +300,10 @@ export default async function handler(req, res) {
         const kTipo = findProp(schema, ["Tipo"]);
         const kCategoria = findProp(schema, ["Categoria"]);
         const kStato = findProp(schema, ["Stato"]);
+        const kData = findProp(schema, ["Data"]);
+        const kRicorrenza = findProp(schema, ["Ricorrenza"]);
+        const kMesiDurata = findProp(schema, ["Mesi durata", "Mesi", "Durata"]);
+        const kFatturato = findProp(schema, ["Fatturato"]);
         const rows = await notionQuery(dbId);
         const movimenti = rows.map(pg => {
           const pr = pg.properties || {};
@@ -307,44 +311,104 @@ export default async function handler(req, res) {
           for (const [k, v] of Object.entries(pr)) out[k] = readProp(v);
           return out;
         });
-        // Calcoli
+
+        const now = new Date();
+        const meseCorrente = now.getFullYear() + "-" + String(now.getMonth() + 1).padStart(2, "0");
+        // mesi trascorsi dall'inizio contratto fino a oggi (incluso)
+        const mesiTrascorsi = (dataStart) => {
+          if (!dataStart) return 1;
+          const d = new Date(dataStart);
+          if (isNaN(d)) return 1;
+          let m = (now.getFullYear() - d.getFullYear()) * 12 + (now.getMonth() - d.getMonth()) + 1;
+          return m < 1 ? 0 : m;
+        };
+
         let entrate = 0, uscite = 0, fatturato = 0, daFatturare = 0;
+        let entrateMese = 0, usciteMese = 0;
+
         for (const m of movimenti) {
-          const imp = Number(kImporto ? m[kImporto] : 0) || 0;
+          const impTot = Number(kImporto ? m[kImporto] : 0) || 0;
           const tipo = norm(kTipo ? m[kTipo] : "");
           const cat = norm(kCategoria ? m[kCategoria] : "");
-          const isEntrata = tipo.includes("entrata") || imp > 0 && !tipo.includes("uscita");
-          if (tipo.includes("uscita") || cat.includes("spesa") || cat.includes("fotografo") || cat.includes("videomaker") || cat.includes("modella")) {
-            uscite += Math.abs(imp);
+          const stato = norm(kStato ? m[kStato] : "");
+          const dataStr = kData ? m[kData] : null;
+          const ric = norm(kRicorrenza ? m[kRicorrenza] : "");
+          const mesiDur = Number(kMesiDurata ? m[kMesiDurata] : 0) || (ric.includes("trimestr") ? 3 : ric.includes("semestr") ? 6 : ric.includes("annual") ? 12 : ric.includes("mensile") ? 12 : 1);
+          const isFatturato = kFatturato ? norm(m[kFatturato]).startsWith("s") : !(cat.includes("da fatturare") || cat.includes("non fatturato"));
+          const isUscita = tipo.includes("uscita") || cat.includes("spesa") || cat.includes("fotografo") || cat.includes("videomaker") || cat.includes("modella");
+
+          // importo mensile (spalmato) e totale maturato ad oggi
+          const perMese = mesiDur > 0 ? impTot / mesiDur : impTot;
+          const mesiOk = Math.min(mesiTrascorsi(dataStr), mesiDur || 1);
+          const maturato = perMese * (mesiOk > 0 ? mesiOk : 1);
+
+          const nelMeseCorrente = dataStr && (new Date(dataStr).getFullYear() + "-" + String(new Date(dataStr).getMonth() + 1).padStart(2, "0")) === meseCorrente;
+          // la ricorrenza è "attiva" nel mese corrente se il contratto copre questo mese
+          const attivaOra = mesiOk > 0 && mesiOk <= (mesiDur || 1);
+
+          if (isUscita) {
+            uscite += Math.abs(maturato);
+            if (attivaOra || nelMeseCorrente) usciteMese += Math.abs(perMese);
           } else {
-            entrate += Math.abs(imp);
-            // fatturato vs da fatturare: se categoria/stato dice "da fatturare" o "non fatturato"
-            const stato = norm(kStato ? m[kStato] : "");
-            if (cat.includes("da fatturare") || stato.includes("da fatturare") || cat.includes("non fatturato")) daFatturare += Math.abs(imp);
-            else fatturato += Math.abs(imp);
+            entrate += Math.abs(maturato);
+            if (attivaOra) entrateMese += Math.abs(perMese);
+            if (isFatturato) fatturato += Math.abs(maturato);
+            else daFatturare += Math.abs(maturato);
           }
         }
-        // Calcolo forfettario (valori Alessio: coeff 78%, imposta 5%, INPS 26,07%)
+
+        // Incassi extra ricorrenti non fatturati (Furore + Cooperativa)
+        const meseDaGennaio2026 = () => {
+          const g = new Date(2026, 0, 1);
+          let m = (now.getFullYear() - g.getFullYear()) * 12 + (now.getMonth() - g.getMonth()) + 1;
+          return m < 1 ? 0 : m;
+        };
+        const mesiCoop = meseDaGennaio2026();
+        const extraFurore = 500 * mesiTrascorsi(null); // Furore 500/mese (approssimato da inizio; se serve data esatta si aggiusta)
+        const extraCoopMensile = 60 * mesiCoop;
+        const extraCoopSito = 500; // una tantum gennaio
+        const extraTotale = 500 /*Furore mese corrente base*/ + extraCoopMensile + extraCoopSito;
+        // Per il totale complessivo: Furore 500/mese e Coop 60/mese maturati
+        const extraFuroreMensile = 500; // 500 al mese
+        const extraFuroreTot = extraFuroreMensile * mesiCoop; // stesso orizzonte gennaio->oggi
+        const incassiExtraTotale = extraFuroreTot + extraCoopMensile + extraCoopSito;
+        const incassiExtraMese = extraFuroreMensile + 60; // questo mese: Furore 500 + Coop 60
+
+        entrate += incassiExtraTotale;
+        daFatturare += incassiExtraTotale; // extra non fatturati
+        entrateMese += incassiExtraMese;
+
         const COEFF = 0.78, IMPOSTA = 0.05, INPS = 0.2607;
         const imponibile = fatturato * COEFF;
         const impostaSost = imponibile * IMPOSTA;
         const contributiInps = imponibile * INPS;
         const daAccantonare = impostaSost + contributiInps;
+        const r2 = (n) => Math.round(n * 100) / 100;
         return res.status(200).json({
           ok: true,
           movimenti,
           conti: {
-            entrate: Math.round(entrate * 100) / 100,
-            uscite: Math.round(uscite * 100) / 100,
-            saldo: Math.round((entrate - uscite) * 100) / 100,
-            fatturato: Math.round(fatturato * 100) / 100,
-            daFatturare: Math.round(daFatturare * 100) / 100,
+            entrate: r2(entrate),
+            uscite: r2(uscite),
+            saldo: r2(entrate - uscite),
+            fatturato: r2(fatturato),
+            daFatturare: r2(daFatturare),
+            meseCorrente: {
+              label: meseCorrente,
+              entrate: r2(entrateMese),
+              uscite: r2(usciteMese),
+              saldo: r2(entrateMese - usciteMese)
+            },
+            extra: {
+              furoreMensile: 500, coopMensile: 60, coopSito: 500, mesiConteggiati: mesiCoop,
+              incassiExtraTotale: r2(incassiExtraTotale)
+            },
             fiscale: {
               coefficiente: COEFF, aliquotaImposta: IMPOSTA, aliquotaInps: INPS,
-              imponibile: Math.round(imponibile * 100) / 100,
-              impostaSostitutiva: Math.round(impostaSost * 100) / 100,
-              contributiInps: Math.round(contributiInps * 100) / 100,
-              daAccantonare: Math.round(daAccantonare * 100) / 100
+              imponibile: r2(imponibile),
+              impostaSostitutiva: r2(impostaSost),
+              contributiInps: r2(contributiInps),
+              daAccantonare: r2(daAccantonare)
             }
           }
         });
