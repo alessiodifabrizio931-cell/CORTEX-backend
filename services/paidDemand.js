@@ -2,365 +2,843 @@
 //
 // OCULUS — PAID DEMAND ENGINE
 //
-// Cerca sul web richieste REALI di servizi/prodotti digitali
-// attraverso Gemini + Google Search grounding.
+// Versione FREE:
+// - NON usa Google Search Grounding
+// - NON richiede credito Google
+// - usa fonti pubbliche gratuite
 //
-// Non effettua scraping diretto di LinkedIn.
-// Cerca invece contenuti pubblicamente disponibili e indicizzati
-// sul web, incluse job board, marketplace, siti aziendali,
-// LinkedIn quando indicizzato e altre fonti.
+// Fonti iniziali:
+// 1. Remote OK
+// 2. Remotive
 //
-// OUTPUT:
-// - titolo opportunità
-// - cliente/azienda se disponibile
-// - servizio richiesto
-// - budget se presente
-// - fonte
-// - URL
-// - descrizione
-// - fit con CORTEX
-// - automazione stimata
-// - priorità
+// Gemini viene usato SOLO per classificare e valutare i risultati,
+// non per cercarli sul web.
 
-const SEARCH_MODEL =
-  process.env.GEMINI_SEARCH_MODEL ||
-  "gemini-3.5-flash";
+const ANALYSIS_MODEL =
+  process.env.GEMINI_MODEL ||
+  "gemini-3.5-flash-lite";
 
-export async function searchPaidDemand(body, res) {
-  const key = process.env.GEMINI_API_KEY;
+function stripHtml(text) {
+  return (text || "")
+    .toString()
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
-  if (!key) {
-    return res.status(500).json({
-      error: "GEMINI_API_KEY mancante"
-    });
+function normalize(text) {
+  return (text || "")
+    .toString()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim();
+}
+
+function matchesQuery(job, query) {
+  const q = normalize(query);
+
+  if (!q) return true;
+
+  const haystack = normalize(
+    [
+      job.title,
+      job.company,
+      job.description,
+      job.tags?.join(" "),
+      job.category
+    ]
+      .filter(Boolean)
+      .join(" ")
+  );
+
+  const words = q
+    .split(/\s+/)
+    .filter((w) => w.length > 2);
+
+  if (!words.length) {
+    return haystack.includes(q);
   }
 
-  const service = (body.service || body.query || "")
+  return words.some((word) =>
+    haystack.includes(word)
+  );
+}
+
+async function fetchRemoteOK() {
+  try {
+    const response = await fetch(
+      "https://remoteok.com/api",
+      {
+        headers: {
+          "User-Agent":
+            "CORTEX/1.0 (+https://cortex.local)"
+        }
+      }
+    );
+
+    if (!response.ok) {
+      console.error(
+        "[OCULUS / RemoteOK]",
+        response.status
+      );
+
+      return [];
+    }
+
+    const data = await response.json();
+
+    if (!Array.isArray(data)) {
+      return [];
+    }
+
+    // Il primo elemento può essere metadata/licenza.
+    return data
+      .filter(
+        (item) =>
+          item &&
+          item.position &&
+          item.url
+      )
+      .map((item) => ({
+        source: "Remote OK",
+
+        title:
+          item.position || "",
+
+        client:
+          item.company || null,
+
+        company:
+          item.company || null,
+
+        location:
+          item.location || "Remote",
+
+        remote: true,
+
+        url:
+          item.url || null,
+
+        description:
+          stripHtml(
+            item.description || ""
+          ).slice(0, 1800),
+
+        category: null,
+
+        tags:
+          Array.isArray(item.tags)
+            ? item.tags
+            : [],
+
+        salaryMin:
+          Number(item.salary_min) || null,
+
+        salaryMax:
+          Number(item.salary_max) || null,
+
+        currency:
+          item.currency || null,
+
+        publishedAt:
+          item.date || null
+      }));
+  } catch (error) {
+    console.error(
+      "[OCULUS / RemoteOK error]",
+      error
+    );
+
+    return [];
+  }
+}
+
+async function fetchRemotive(query) {
+  try {
+    const url =
+      "https://remotive.com/api/remote-jobs" +
+      "?search=" +
+      encodeURIComponent(query || "") +
+      "&limit=50";
+
+    const response = await fetch(url);
+
+    if (!response.ok) {
+      console.error(
+        "[OCULUS / Remotive]",
+        response.status
+      );
+
+      return [];
+    }
+
+    const data = await response.json();
+
+    const jobs =
+      Array.isArray(data?.jobs)
+        ? data.jobs
+        : [];
+
+    return jobs.map((item) => ({
+      source: "Remotive",
+
+      title:
+        item.title || "",
+
+      client:
+        item.company_name || null,
+
+      company:
+        item.company_name || null,
+
+      location:
+        item.candidate_required_location ||
+        "Remote",
+
+      remote: true,
+
+      url:
+        item.url || null,
+
+      description:
+        stripHtml(
+          item.description || ""
+        ).slice(0, 1800),
+
+      category:
+        item.category || null,
+
+      tags:
+        Array.isArray(item.tags)
+          ? item.tags
+          : [],
+
+      salary:
+        item.salary || null,
+
+      salaryMin: null,
+      salaryMax: null,
+
+      currency: null,
+
+      publishedAt:
+        item.publication_date || null
+    }));
+  } catch (error) {
+    console.error(
+      "[OCULUS / Remotive error]",
+      error
+    );
+
+    return [];
+  }
+}
+
+function removeDuplicates(items) {
+  const seen = new Set();
+
+  return items.filter((item) => {
+    const key =
+      normalize(
+        `${item.source}|${item.url}|${item.title}|${item.company}`
+      );
+
+    if (!key || seen.has(key)) {
+      return false;
+    }
+
+    seen.add(key);
+
+    return true;
+  });
+}
+
+function simpleScore(job, query) {
+  const text = normalize(
+    [
+      job.title,
+      job.description,
+      job.tags?.join(" "),
+      job.category
+    ]
+      .filter(Boolean)
+      .join(" ")
+  );
+
+  const qWords = normalize(query)
+    .split(/\s+/)
+    .filter((w) => w.length > 2);
+
+  let fitScore = 45;
+
+  for (const word of qWords) {
+    if (text.includes(word)) {
+      fitScore += 8;
+    }
+  }
+
+  const digitalKeywords = [
+    "shopify",
+    "ecommerce",
+    "e-commerce",
+    "website",
+    "web",
+    "wordpress",
+    "webflow",
+    "developer",
+    "design",
+    "marketing",
+    "social",
+    "content",
+    "automation",
+    "ai",
+    "artificial intelligence",
+    "saas",
+    "landing",
+    "seo",
+    "video",
+    "branding"
+  ];
+
+  for (const keyword of digitalKeywords) {
+    if (text.includes(keyword)) {
+      fitScore += 2;
+    }
+  }
+
+  fitScore = Math.min(100, fitScore);
+
+  let automationScore = 40;
+
+  const automationFriendly = [
+    "website",
+    "shopify",
+    "wordpress",
+    "webflow",
+    "frontend",
+    "content",
+    "copywriting",
+    "seo",
+    "social",
+    "marketing",
+    "automation",
+    "ai",
+    "chatbot",
+    "design",
+    "landing"
+  ];
+
+  for (const keyword of automationFriendly) {
+    if (text.includes(keyword)) {
+      automationScore += 4;
+    }
+  }
+
+  automationScore =
+    Math.min(95, automationScore);
+
+  let priority = "LOW";
+
+  if (
+    fitScore >= 80 &&
+    automationScore >= 65
+  ) {
+    priority = "HIGH";
+  } else if (
+    fitScore >= 60
+  ) {
+    priority = "MEDIUM";
+  }
+
+  return {
+    fitScore,
+    automationScore,
+    priority
+  };
+}
+
+async function analyzeWithGemini(
+  jobs,
+  query
+) {
+  const key =
+    process.env.GEMINI_API_KEY;
+
+  if (!key || !jobs.length) {
+    return null;
+  }
+
+  const compactJobs = jobs
+    .slice(0, 20)
+    .map((job, index) => ({
+      index,
+
+      title:
+        job.title,
+
+      company:
+        job.company,
+
+      source:
+        job.source,
+
+      description:
+        job.description
+          .slice(0, 700),
+
+      tags:
+        job.tags
+    }));
+
+  const prompt = `
+Sei OCULUS, analista commerciale di CORTEX.
+
+L'utente cerca opportunità per:
+
+"${query}"
+
+Qui sotto trovi offerte REALI recuperate da API pubbliche.
+
+Valuta SOLTANTO queste offerte.
+NON inventare nuove offerte.
+
+Per ogni indice restituisci:
+
+- fitScore da 0 a 100
+- automationScore da 0 a 100
+- priority: HIGH, MEDIUM o LOW
+- reason: massimo 20 parole in italiano
+
+Considera CORTEX particolarmente forte in:
+- sviluppo siti web
+- Shopify
+- e-commerce
+- WordPress
+- landing page
+- web app
+- AI e automazioni
+- marketing digitale
+- social media
+- contenuti
+- branding
+- video
+- prodotti digitali
+
+JSON PURO:
+
+{
+  "results": [
+    {
+      "index": 0,
+      "fitScore": 0,
+      "automationScore": 0,
+      "priority": "LOW",
+      "reason": ""
+    }
+  ]
+}
+
+OFFERS:
+${JSON.stringify(compactJobs)}
+`;
+
+  try {
+    const url =
+      `https://generativelanguage.googleapis.com/v1beta/models/${ANALYSIS_MODEL}:generateContent?key=${key}`;
+
+    const response =
+      await fetch(url, {
+        method: "POST",
+
+        headers: {
+          "Content-Type":
+            "application/json"
+        },
+
+        body: JSON.stringify({
+          contents: [
+            {
+              role: "user",
+              parts: [
+                {
+                  text: prompt
+                }
+              ]
+            }
+          ],
+
+          generationConfig: {
+            temperature: 0.1,
+            maxOutputTokens: 4096,
+            responseMimeType:
+              "application/json"
+          }
+        })
+      });
+
+    const data =
+      await response.json();
+
+    if (!response.ok) {
+      console.error(
+        "[OCULUS / Gemini analysis]",
+        data
+      );
+
+      return null;
+    }
+
+    const raw =
+      (
+        data?.candidates?.[0]
+          ?.content?.parts || []
+      )
+        .map(
+          (part) =>
+            part.text || ""
+        )
+        .join("")
+        .trim();
+
+    if (!raw) {
+      return null;
+    }
+
+    return JSON.parse(raw);
+  } catch (error) {
+    console.error(
+      "[OCULUS / Gemini analysis error]",
+      error
+    );
+
+    return null;
+  }
+}
+
+export async function searchPaidDemand(
+  body,
+  res
+) {
+  const service = (
+    body.service ||
+    body.query ||
+    ""
+  )
     .toString()
     .trim()
     .slice(0, 300);
 
   if (!service) {
     return res.status(400).json({
-      error: "service/query mancante"
+      error:
+        "service/query mancante"
     });
   }
 
-  const location = (body.location || "")
-    .toString()
-    .trim()
-    .slice(0, 150);
-
-  const maxResults = Math.min(
-    Math.max(parseInt(body.maxResults) || 10, 1),
-    20
-  );
-
-  const locationText = location
-    ? `Localizzazione preferita: ${location}.`
-    : `La ricerca può essere internazionale e includere opportunità remote.`;
-
-  const prompt = `
-Sei OCULUS, il motore commerciale di CORTEX.
-
-Devi trovare sul WEB opportunità REALI e ATTUALI dove qualcuno sta cercando
-e potenzialmente pagando per questo servizio o prodotto:
-
-"${service}"
-
-${locationText}
-
-CERCA SOPRATTUTTO:
-- richieste di realizzazione siti web
-- Shopify ed e-commerce
-- WordPress
-- Webflow
-- landing page
-- web app
-- SaaS e micro-SaaS
-- automazioni
-- integrazioni AI
-- chatbot
-- lead generation
-- marketing digitale
-- social media
-- content creation
-- video
-- branding
-- design
-- prodotti digitali
-- cataloghi online
-- gestione e-commerce
-- richieste freelance
-- consulenza digitale
-- altri servizi compatibili con il servizio richiesto
-
-FONTI UTILI:
-- LinkedIn quando il contenuto è pubblicamente indicizzato
-- Indeed
-- Upwork
-- Freelancer
-- Contra
-- Malt
-- RemoteOK
-- We Work Remotely
-- job board
-- siti aziendali
-- pagine Careers
-- forum/business community pubbliche
-- richieste pubbliche indicizzate da Google
-
-REGOLE FONDAMENTALI:
-
-1. NON inventare offerte.
-2. Ogni opportunità deve provenire da una fonte reale trovata tramite Google Search.
-3. Non inserire opportunità senza un URL verificabile.
-4. Dai priorità alle offerte recenti.
-5. Se il budget non è indicato, usa null. NON inventare il budget.
-6. Se il nome del cliente non è disponibile, usa null.
-7. Evita annunci palesemente scaduti quando possibile.
-8. Evita duplicati.
-9. Cerca opportunità dove CORTEX potrebbe realmente produrre almeno una parte significativa del lavoro.
-10. Restituisci massimo ${maxResults} risultati.
-
-Per ogni opportunità valuta:
-
-fitScore:
-da 0 a 100, quanto è compatibile con capacità digitali/AI/web/marketing.
-
-automationScore:
-da 0 a 100, quanta parte del lavoro potrebbe essere automatizzata
-o fortemente assistita da CORTEX.
-
-priority:
-HIGH, MEDIUM oppure LOW.
-
-Restituisci ESCLUSIVAMENTE JSON valido, senza markdown e senza testo prima o dopo.
-
-Formato:
-
-{
-  "query": "${service.replace(/"/g, '\\"')}",
-  "results": [
-    {
-      "title": "titolo dell'opportunità",
-      "client": null,
-      "service": "servizio richiesto",
-      "budget": null,
-      "currency": null,
-      "location": null,
-      "remote": true,
-      "source": "nome piattaforma o sito",
-      "url": "https://...",
-      "description": "breve descrizione concreta",
-      "fitScore": 0,
-      "automationScore": 0,
-      "priority": "HIGH",
-      "reason": "perché è interessante per CORTEX"
-    }
-  ]
-}
-`;
+  const maxResults =
+    Math.min(
+      Math.max(
+        parseInt(
+          body.maxResults
+        ) || 10,
+        1
+      ),
+      20
+    );
 
   try {
-    const url =
-      `https://generativelanguage.googleapis.com/v1beta/models/${SEARCH_MODEL}:generateContent?key=${key}`;
+    const [
+      remoteOK,
+      remotive
+    ] =
+      await Promise.all([
+        fetchRemoteOK(),
+        fetchRemotive(service)
+      ]);
 
-    const response = await fetch(url, {
-      method: "POST",
+    let jobs =
+      [
+        ...remoteOK,
+        ...remotive
+      ];
 
-      headers: {
-        "Content-Type": "application/json"
-      },
+    jobs =
+      removeDuplicates(jobs);
 
-      body: JSON.stringify({
-        contents: [
-          {
-            role: "user",
-            parts: [
-              {
-                text: prompt
-              }
-            ]
-          }
-        ],
-
-        tools: [
-          {
-            google_search: {}
-          }
-        ],
-
-        generationConfig: {
-          temperature: 0.2,
-          maxOutputTokens: 8192,
-          responseMimeType: "application/json"
-        }
-      })
-    });
-
-    const data = await response.json();
-
-    if (!response.ok) {
-      return res.status(response.status).json({
-        error:
-          data?.error?.message ||
-          "Errore Gemini Google Search"
-      });
-    }
-
-    const rawText =
-      (
-        data?.candidates?.[0]?.content?.parts || []
-      )
-        .map((part) => part.text || "")
-        .join("")
-        .trim();
-
-    if (!rawText) {
-      return res.status(502).json({
-        error: "Gemini non ha restituito risultati"
-      });
-    }
-
-    let parsed;
-
-    try {
-      parsed = JSON.parse(rawText);
-    } catch (error) {
-      return res.status(502).json({
-        error: "Risposta Paid Demand non valida",
-        raw: rawText
-      });
-    }
-
-    const results = Array.isArray(parsed.results)
-      ? parsed.results
-      : [];
-
-    const cleanResults = results
-      .filter(
-        (item) =>
-          item &&
-          typeof item.url === "string" &&
-          item.url.startsWith("http")
-      )
-      .slice(0, maxResults)
-      .map((item, index) => ({
-        id: `PD-${Date.now()}-${index + 1}`,
-
-        title:
-          item.title ||
-          "Opportunità senza titolo",
-
-        client:
-          item.client || null,
-
-        service:
-          item.service || service,
-
-        budget:
-          item.budget ?? null,
-
-        currency:
-          item.currency || null,
-
-        location:
-          item.location || null,
-
-        remote:
-          Boolean(item.remote),
-
-        source:
-          item.source ||
-          "Web",
-
-        url:
-          item.url,
-
-        description:
-          item.description || "",
-
-        fitScore:
-          Math.min(
-            100,
-            Math.max(
-              0,
-              Number(item.fitScore) || 0
-            )
-          ),
-
-        automationScore:
-          Math.min(
-            100,
-            Math.max(
-              0,
-              Number(item.automationScore) || 0
-            )
-          ),
-
-        priority:
-          ["HIGH", "MEDIUM", "LOW"].includes(
-            item.priority
+    jobs =
+      jobs.filter(
+        (job) =>
+          job.url &&
+          matchesQuery(
+            job,
+            service
           )
-            ? item.priority
-            : "MEDIUM",
+      );
 
-        reason:
-          item.reason || ""
-      }));
+    // Pre-score locale gratuito
+    jobs =
+      jobs.map((job) => {
+        const score =
+          simpleScore(
+            job,
+            service
+          );
 
-    cleanResults.sort((a, b) => {
-      const priorityValue = {
-        HIGH: 3,
-        MEDIUM: 2,
-        LOW: 1
-      };
+        return {
+          ...job,
+          ...score
+        };
+      });
 
-      const aScore =
-        a.fitScore * 0.6 +
-        a.automationScore * 0.4 +
-        priorityValue[a.priority] * 5;
+    jobs.sort(
+      (a, b) =>
+        (
+          b.fitScore *
+            0.6 +
+          b.automationScore *
+            0.4
+        ) -
+        (
+          a.fitScore *
+            0.6 +
+          a.automationScore *
+            0.4
+        )
+    );
 
-      const bScore =
-        b.fitScore * 0.6 +
-        b.automationScore * 0.4 +
-        priorityValue[b.priority] * 5;
+    jobs =
+      jobs.slice(
+        0,
+        Math.max(
+          maxResults,
+          15
+        )
+      );
 
-      return bScore - aScore;
-    });
+    // Gemini classifica le offerte REALI.
+    // Se Gemini non risponde, il sistema continua comunque
+    // usando gli score locali.
+    const aiAnalysis =
+      await analyzeWithGemini(
+        jobs,
+        service
+      );
 
-    const groundingMetadata =
-      data?.candidates?.[0]?.groundingMetadata ||
-      null;
+    if (
+      Array.isArray(
+        aiAnalysis?.results
+      )
+    ) {
+      for (
+        const ai of
+        aiAnalysis.results
+      ) {
+        const index =
+          Number(ai.index);
+
+        if (
+          !Number.isInteger(
+            index
+          ) ||
+          !jobs[index]
+        ) {
+          continue;
+        }
+
+        jobs[index].fitScore =
+          Math.min(
+            100,
+            Math.max(
+              0,
+              Number(
+                ai.fitScore
+              ) || 0
+            )
+          );
+
+        jobs[
+          index
+        ].automationScore =
+          Math.min(
+            100,
+            Math.max(
+              0,
+              Number(
+                ai.automationScore
+              ) || 0
+            )
+          );
+
+        jobs[index].priority =
+          [
+            "HIGH",
+            "MEDIUM",
+            "LOW"
+          ].includes(
+            ai.priority
+          )
+            ? ai.priority
+            : jobs[index]
+                .priority;
+
+        jobs[index].reason =
+          ai.reason || "";
+      }
+    }
+
+    jobs.sort(
+      (a, b) => {
+        const priorities = {
+          HIGH: 3,
+          MEDIUM: 2,
+          LOW: 1
+        };
+
+        const scoreA =
+          a.fitScore *
+            0.6 +
+          a.automationScore *
+            0.4 +
+          priorities[
+            a.priority
+          ] *
+            5;
+
+        const scoreB =
+          b.fitScore *
+            0.6 +
+          b.automationScore *
+            0.4 +
+          priorities[
+            b.priority
+          ] *
+            5;
+
+        return (
+          scoreB -
+          scoreA
+        );
+      }
+    );
+
+    const results =
+      jobs
+        .slice(
+          0,
+          maxResults
+        )
+        .map(
+          (
+            job,
+            index
+          ) => {
+            let budget =
+              job.salary ||
+              null;
+
+            if (
+              !budget &&
+              (
+                job.salaryMin ||
+                job.salaryMax
+              )
+            ) {
+              budget =
+                `${
+                  job.salaryMin ||
+                  "?"
+                } - ${
+                  job.salaryMax ||
+                  "?"
+                }`;
+            }
+
+            return {
+              id:
+                `PD-${Date.now()}-${index + 1}`,
+
+              title:
+                job.title ||
+                "Opportunità",
+
+              client:
+                job.client ||
+                null,
+
+              service:
+                service,
+
+              budget,
+
+              currency:
+                job.currency ||
+                null,
+
+              location:
+                job.location ||
+                null,
+
+              remote:
+                job.remote !==
+                false,
+
+              source:
+                job.source,
+
+              url:
+                job.url,
+
+              description:
+                job.description
+                  .slice(
+                    0,
+                    600
+                  ),
+
+              fitScore:
+                job.fitScore,
+
+              automationScore:
+                job.automationScore,
+
+              priority:
+                job.priority,
+
+              reason:
+                job.reason ||
+                "Opportunità compatibile con le capacità digitali di CORTEX.",
+
+              publishedAt:
+                job.publishedAt ||
+                null
+            };
+          }
+        );
 
     return res.status(200).json({
       ok: true,
 
-      mode: "paid_demand",
+      mode:
+        "paid_demand",
 
-      query: service,
+      engine:
+        "free_public_sources",
 
-      location:
-        location || null,
+      query:
+        service,
 
       count:
-        cleanResults.length,
+        results.length,
 
-      results:
-        cleanResults,
+      sources: [
+        "Remote OK",
+        "Remotive"
+      ],
 
-      grounding: groundingMetadata
-        ? {
-            webSearchQueries:
-              groundingMetadata.webSearchQueries ||
-              [],
-
-            searchEntryPoint:
-              groundingMetadata.searchEntryPoint ||
-              null
-          }
-        : null
+      results
     });
   } catch (error) {
     console.error(
