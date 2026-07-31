@@ -51,9 +51,10 @@ export default async function handler(req, res) {
       const videos = vd.videos || [];
       if (!videos.length) return res.status(404).json({ error: `Nessuna clip Pexels per "${query}"` });
       const pick = videos[Math.floor(Math.random() * videos.length)];
+      // Tra i file verticali, prendi quello con la risoluzione PIU' ALTA (4K/HD)
       const files = (pick.video_files || [])
         .filter((f) => f.file_type === "video/mp4" && (f.height || 0) >= (f.width || 0))
-        .sort((a, b) => Math.abs((a.height || 0) - 1920) - Math.abs((b.height || 0) - 1920));
+        .sort((a, b) => (b.height || 0) - (a.height || 0)); // dalla piu' alta alla piu' bassa
       const bgUrl = files.length ? files[0].link : (pick.video_files?.[0]?.link || null);
       if (!bgUrl) return res.status(404).json({ error: "Nessun file mp4 utilizzabile da Pexels" });
 
@@ -137,6 +138,203 @@ export default async function handler(req, res) {
 
     // --- NOTION: helper header ---
     const notionH = () => ({ "Authorization": `Bearer ${process.env.NOTION_TOKEN}`, "Notion-Version": "2022-06-28", "Content-Type": "application/json" });
+
+    // ===== ATLAS / MIDAS: helper per leggere e scrivere database gestionali =====
+    // Legge il valore "semplice" di una proprieta' Notion, qualunque sia il tipo
+    const readProp = (p) => {
+      if (!p) return null;
+      switch (p.type) {
+        case "title": return (p.title || []).map(t => t.plain_text).join("");
+        case "rich_text": return (p.rich_text || []).map(t => t.plain_text).join("");
+        case "number": return p.number;
+        case "select": return p.select ? p.select.name : null;
+        case "multi_select": return (p.multi_select || []).map(s => s.name).join(", ");
+        case "date": return p.date ? p.date.start : null;
+        case "email": return p.email || null;
+        case "phone_number": return p.phone_number || null;
+        case "checkbox": return p.checkbox;
+        case "url": return p.url || null;
+        default: return null;
+      }
+    };
+    // Trova il nome reale di una colonna partendo da alias (case/accent-insensitive)
+    const norm = (s) => (s || "").toString().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
+    const findProp = (schemaProps, aliases) => {
+      const keys = Object.keys(schemaProps || {});
+      for (const a of aliases) { const t = norm(a); const k = keys.find(k => norm(k) === t); if (k) return k; }
+      return null;
+    };
+    // Legge tutte le righe di un database (max 100)
+    const notionQuery = async (dbId) => {
+      const r = await fetch(`https://api.notion.com/v1/databases/${dbId}/query`, { method: "POST", headers: notionH(), body: JSON.stringify({ page_size: 100 }) });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d?.message || "Errore query Notion");
+      return d.results || [];
+    };
+    const notionSchema = async (dbId) => {
+      const r = await fetch(`https://api.notion.com/v1/databases/${dbId}`, { headers: notionH() });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d?.message || "Errore schema Notion");
+      return d.properties || {};
+    };
+
+    // --- ATLAS: legge il database CLIENTI ---
+    if (body.action === "atlas_read") {
+      if (!process.env.NOTION_TOKEN) return res.status(500).json({ error: "NOTION_TOKEN mancante" });
+      const dbId = (body.databaseId || "").toString().replace(/-/g, "").trim();
+      if (!dbId) return res.status(400).json({ error: "databaseId mancante" });
+      try {
+        const rows = await notionQuery(dbId);
+        const clienti = rows.map(pg => {
+          const pr = pg.properties || {};
+          const out = {};
+          for (const [k, v] of Object.entries(pr)) out[k] = readProp(v);
+          out._id = pg.id;
+          return out;
+        });
+        return res.status(200).json({ ok: true, clienti });
+      } catch (e) { return res.status(500).json({ error: String(e.message || e) }); }
+    }
+
+    // --- ATLAS: aggiunge un cliente ---
+    if (body.action === "atlas_write") {
+      if (!process.env.NOTION_TOKEN) return res.status(500).json({ error: "NOTION_TOKEN mancante" });
+      const dbId = (body.databaseId || "").toString().replace(/-/g, "").trim();
+      if (!dbId) return res.status(400).json({ error: "databaseId mancante" });
+      const dati = body.dati || {};
+      try {
+        const schema = await notionSchema(dbId);
+        const props = {};
+        const map = [
+          { al: ["Nome", "Name"], v: dati.nome, t: "title" },
+          { al: ["Stato"], v: dati.stato, t: "select" },
+          { al: ["Telefono"], v: dati.telefono, t: "rich_text" },
+          { al: ["Email"], v: dati.email, t: "email" },
+          { al: ["Servizio"], v: dati.servizio, t: "select" },
+          { al: ["Citta", "Città"], v: dati.citta, t: "rich_text" },
+          { al: ["Tipo rinnovo"], v: dati.tipoRinnovo, t: "select" },
+          { al: ["Data rinnovo"], v: dati.dataRinnovo, t: "date" },
+          { al: ["Ultimo contatto"], v: dati.ultimoContatto, t: "date" },
+          { al: ["Prossima azione"], v: dati.prossimaAzione, t: "date" },
+          { al: ["Note"], v: dati.note, t: "rich_text" }
+        ];
+        for (const m of map) {
+          if (m.v == null || m.v === "") continue;
+          const key = findProp(schema, m.al);
+          if (!key) continue;
+          const realType = schema[key].type;
+          if (realType === "title") props[key] = { title: [{ text: { content: String(m.v).slice(0, 200) } }] };
+          else if (realType === "rich_text") props[key] = { rich_text: [{ text: { content: String(m.v).slice(0, 1800) } }] };
+          else if (realType === "select") props[key] = { select: { name: String(m.v).slice(0, 100) } };
+          else if (realType === "email") props[key] = { email: String(m.v) };
+          else if (realType === "phone_number") props[key] = { phone_number: String(m.v) };
+          else if (realType === "date") props[key] = { date: { start: String(m.v) } };
+          else if (realType === "number") props[key] = { number: Number(m.v) };
+        }
+        const r = await fetch("https://api.notion.com/v1/pages", { method: "POST", headers: notionH(), body: JSON.stringify({ parent: { database_id: dbId }, properties: props }) });
+        const d = await r.json();
+        if (!r.ok) return res.status(r.status).json({ error: d?.message || "Errore creazione cliente" });
+        return res.status(200).json({ ok: true, url: d.url || null });
+      } catch (e) { return res.status(500).json({ error: String(e.message || e) }); }
+    }
+
+    // --- MIDAS: legge MOVIMENTI e calcola i conti (fatturato, incassato, tasse) ---
+    if (body.action === "midas_read") {
+      if (!process.env.NOTION_TOKEN) return res.status(500).json({ error: "NOTION_TOKEN mancante" });
+      const dbId = (body.databaseId || "").toString().replace(/-/g, "").trim();
+      if (!dbId) return res.status(400).json({ error: "databaseId mancante" });
+      try {
+        const schema = await notionSchema(dbId);
+        const kImporto = findProp(schema, ["Importo"]);
+        const kTipo = findProp(schema, ["Tipo"]);
+        const kCategoria = findProp(schema, ["Categoria"]);
+        const kStato = findProp(schema, ["Stato"]);
+        const rows = await notionQuery(dbId);
+        const movimenti = rows.map(pg => {
+          const pr = pg.properties || {};
+          const out = {};
+          for (const [k, v] of Object.entries(pr)) out[k] = readProp(v);
+          return out;
+        });
+        // Calcoli
+        let entrate = 0, uscite = 0, fatturato = 0, daFatturare = 0;
+        for (const m of movimenti) {
+          const imp = Number(kImporto ? m[kImporto] : 0) || 0;
+          const tipo = norm(kTipo ? m[kTipo] : "");
+          const cat = norm(kCategoria ? m[kCategoria] : "");
+          const isEntrata = tipo.includes("entrata") || imp > 0 && !tipo.includes("uscita");
+          if (tipo.includes("uscita") || cat.includes("spesa") || cat.includes("fotografo") || cat.includes("videomaker") || cat.includes("modella")) {
+            uscite += Math.abs(imp);
+          } else {
+            entrate += Math.abs(imp);
+            // fatturato vs da fatturare: se categoria/stato dice "da fatturare" o "non fatturato"
+            const stato = norm(kStato ? m[kStato] : "");
+            if (cat.includes("da fatturare") || stato.includes("da fatturare") || cat.includes("non fatturato")) daFatturare += Math.abs(imp);
+            else fatturato += Math.abs(imp);
+          }
+        }
+        // Calcolo forfettario (valori Alessio: coeff 78%, imposta 5%, INPS 26,07%)
+        const COEFF = 0.78, IMPOSTA = 0.05, INPS = 0.2607;
+        const imponibile = fatturato * COEFF;
+        const impostaSost = imponibile * IMPOSTA;
+        const contributiInps = imponibile * INPS;
+        const daAccantonare = impostaSost + contributiInps;
+        return res.status(200).json({
+          ok: true,
+          movimenti,
+          conti: {
+            entrate: Math.round(entrate * 100) / 100,
+            uscite: Math.round(uscite * 100) / 100,
+            saldo: Math.round((entrate - uscite) * 100) / 100,
+            fatturato: Math.round(fatturato * 100) / 100,
+            daFatturare: Math.round(daFatturare * 100) / 100,
+            fiscale: {
+              coefficiente: COEFF, aliquotaImposta: IMPOSTA, aliquotaInps: INPS,
+              imponibile: Math.round(imponibile * 100) / 100,
+              impostaSostitutiva: Math.round(impostaSost * 100) / 100,
+              contributiInps: Math.round(contributiInps * 100) / 100,
+              daAccantonare: Math.round(daAccantonare * 100) / 100
+            }
+          }
+        });
+      } catch (e) { return res.status(500).json({ error: String(e.message || e) }); }
+    }
+
+    // --- MIDAS: aggiunge un movimento ---
+    if (body.action === "midas_write") {
+      if (!process.env.NOTION_TOKEN) return res.status(500).json({ error: "NOTION_TOKEN mancante" });
+      const dbId = (body.databaseId || "").toString().replace(/-/g, "").trim();
+      if (!dbId) return res.status(400).json({ error: "databaseId mancante" });
+      const dati = body.dati || {};
+      try {
+        const schema = await notionSchema(dbId);
+        const props = {};
+        const map = [
+          { al: ["Descrizione", "Nome", "Name"], v: dati.descrizione, t: "title" },
+          { al: ["Tipo"], v: dati.tipo, t: "select" },
+          { al: ["Categoria"], v: dati.categoria, t: "select" },
+          { al: ["Cliente", "Clienti"], v: dati.cliente, t: "rich_text" },
+          { al: ["Importo"], v: dati.importo, t: "number" },
+          { al: ["Stato"], v: dati.stato, t: "select" },
+          { al: ["Data"], v: dati.data, t: "date" }
+        ];
+        for (const m of map) {
+          if (m.v == null || m.v === "") continue;
+          const key = findProp(schema, m.al);
+          if (!key) continue;
+          const realType = schema[key].type;
+          if (realType === "title") props[key] = { title: [{ text: { content: String(m.v).slice(0, 200) } }] };
+          else if (realType === "rich_text") props[key] = { rich_text: [{ text: { content: String(m.v).slice(0, 1800) } }] };
+          else if (realType === "select") props[key] = { select: { name: String(m.v).slice(0, 100) } };
+          else if (realType === "number") props[key] = { number: Number(m.v) };
+          else if (realType === "date") props[key] = { date: { start: String(m.v) } };
+        }
+        const r = await fetch("https://api.notion.com/v1/pages", { method: "POST", headers: notionH(), body: JSON.stringify({ parent: { database_id: dbId }, properties: props }) });
+        const d = await r.json();
+        if (!r.ok) return res.status(r.status).json({ error: d?.message || "Errore creazione movimento" });
+        return res.status(200).json({ ok: true, url: d.url || null });
+      } catch (e) { return res.status(500).json({ error: String(e.message || e) }); }
+    }
 
     // --- NOTION: crea pagina relazione ---
     if (body.action === "notion") {
