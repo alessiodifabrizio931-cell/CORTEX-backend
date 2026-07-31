@@ -327,33 +327,37 @@ export default async function handler(req, res) {
         let entrateMese = 0, usciteMese = 0;
 
         for (const m of movimenti) {
-          const impTot = Number(kImporto ? m[kImporto] : 0) || 0;
+          const impMensile = Number(kImporto ? m[kImporto] : 0) || 0; // l'importo E' il valore MENSILE
           const tipo = norm(kTipo ? m[kTipo] : "");
           const cat = norm(kCategoria ? m[kCategoria] : "");
           const stato = norm(kStato ? m[kStato] : "");
           const dataStr = kData ? m[kData] : null;
           const ric = norm(kRicorrenza ? m[kRicorrenza] : "");
-          const mesiDur = Number(kMesiDurata ? m[kMesiDurata] : 0) || (ric.includes("trimestr") ? 3 : ric.includes("semestr") ? 6 : ric.includes("annual") ? 12 : ric.includes("mensile") ? 12 : 1);
+          const isUnaTantum = ric.includes("tantum") || ric.includes("una tantum") || (!ric && true);
+          const mesiDur = isUnaTantum ? 1 : (Number(kMesiDurata ? m[kMesiDurata] : 0) || (ric.includes("trimestr") ? 3 : ric.includes("semestr") ? 6 : ric.includes("annual") ? 12 : ric.includes("mensile") ? 12 : 1));
           const isFatturato = kFatturato ? norm(m[kFatturato]).startsWith("s") : !(cat.includes("da fatturare") || cat.includes("non fatturato"));
           const isUscita = tipo.includes("uscita") || cat.includes("spesa") || cat.includes("fotografo") || cat.includes("videomaker") || cat.includes("modella");
 
-          // importo mensile (spalmato) e totale maturato ad oggi
-          const perMese = mesiDur > 0 ? impTot / mesiDur : impTot;
-          const mesiOk = Math.min(mesiTrascorsi(dataStr), mesiDur || 1);
-          const maturato = perMese * (mesiOk > 0 ? mesiOk : 1);
-
+          // mesi effettivamente maturati (dal mese di inizio fino ad oggi, max = durata)
+          const mesiOk = isUnaTantum ? 1 : Math.min(Math.max(mesiTrascorsi(dataStr), 1), mesiDur);
+          const maturato = impMensile * mesiOk; // importo mensile x mesi maturati
+          // il contratto è ancora attivo questo mese?
+          const attivaOra = isUnaTantum ? false : (mesiTrascorsi(dataStr) <= mesiDur && mesiTrascorsi(dataStr) >= 1);
           const nelMeseCorrente = dataStr && (new Date(dataStr).getFullYear() + "-" + String(new Date(dataStr).getMonth() + 1).padStart(2, "0")) === meseCorrente;
-          // la ricorrenza è "attiva" nel mese corrente se il contratto copre questo mese
-          const attivaOra = mesiOk > 0 && mesiOk <= (mesiDur || 1);
 
           if (isUscita) {
             uscite += Math.abs(maturato);
-            if (attivaOra || nelMeseCorrente) usciteMese += Math.abs(perMese);
+            if (attivaOra) usciteMese += Math.abs(impMensile);
+            else if (nelMeseCorrente) usciteMese += Math.abs(impMensile);
           } else {
             entrate += Math.abs(maturato);
-            if (attivaOra) entrateMese += Math.abs(perMese);
-            if (isFatturato) fatturato += Math.abs(maturato);
-            else daFatturare += Math.abs(maturato);
+            if (attivaOra) entrateMese += Math.abs(impMensile);
+            else if (nelMeseCorrente) entrateMese += Math.abs(impMensile);
+            if (isFatturato) {
+              fatturato += Math.abs(maturato);
+            } else {
+              daFatturare += Math.abs(maturato);
+            }
           }
         }
 
