@@ -1,6 +1,6 @@
 import { searchPlaces } from "../services/places.js";
 import { searchPaidDemand } from "../services/paidDemand.js";
-
+import { searchRemotive } from "../services/remotive.js";
 const MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash-lite";
 
 function chunkText(t) {
@@ -293,65 +293,12 @@ export default async function handler(req, res) {
     // Job board pubblico, nessuna chiave. Filtro categorie X Studio:
     // web/dev, design, social/marketing, video/motion, branding.
     // ============================================================
-    if (body.action === "remoteok") {
-      const KW = [
-        "web", "website", "webflow", "wordpress", "shopify", "frontend", "front-end",
-        "design", "graphic", "ui", "ux", "brand", "branding", "logo",
-        "social", "social media", "marketing", "content", "community",
-        "video", "motion", "editor", "videographer", "reels", "tiktok",
-        "photograph", "creative", "art director"
-      ];
-      const limit = Math.min(Math.max(parseInt(body.limit) || 25, 1), 50);
-
-      try {
-        const r = await fetch("https://remoteok.com/api", {
-          headers: { "User-Agent": "CORTEX/1.0 (X Studio)" }
-        });
-        const raw = await r.json();
-        if (!r.ok || !Array.isArray(raw)) {
-          return res.status(502).json({ error: "Errore Remote OK" });
-        }
-
-        // Il primo elemento del feed è metadata legale: filtro solo i job veri.
-        const jobs = raw.filter((j) => j && j.id && j.position);
-
-        const match = (j) => {
-          const hay = (
-            (j.position || "") + " " +
-            (j.description || "") + " " +
-            (Array.isArray(j.tags) ? j.tags.join(" ") : "")
-          ).toLowerCase();
-          return KW.some((k) => hay.includes(k));
-        };
-
-        const results = jobs
-          .filter(match)
-          .slice(0, limit)
-          .map((j) => ({
-            fonte: "Remote OK",
-            titolo: j.position || "",
-            azienda: j.company || "",
-            categoria: Array.isArray(j.tags) ? j.tags.slice(0, 4).join(", ") : "",
-            budget:
-              j.salary_min || j.salary_max
-                ? [j.salary_min, j.salary_max].filter(Boolean).join(" - ") + " USD"
-                : null,
-            remoto: true,
-            data: j.date || null,
-            url: j.url || (j.slug ? "https://remoteok.com/remote-jobs/" + j.slug : null),
-            logo: j.company_logo || j.logo || null
-          }));
-
-        return res.status(200).json({
-          ok: true,
-          fonte: "Remote OK",
-          count: results.length,
-          results
-        });
-      } catch (error) {
-        return res.status(500).json({ error: String(error?.message || error) });
-      }
-    }
+    // ============================================================
+// OCULUS — REMOTE OK
+// ============================================================
+if (body.action === "remoteok") {
+    return searchRemotive(body, res);
+}
 
     // ============================================================
     // NOTION — FUNZIONI COMUNI
