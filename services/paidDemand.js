@@ -1,25 +1,8 @@
 // services/paidDemand.js
 //
-// ============================================================
-// OCULUS — MOTORE DOMANDA ATTIVA v2
-// ============================================================
-//
-// Fonti gratuite:
-// - Remote OK
-// - Remotive
-// - Himalayas
-//
-// Analisi:
-// - scoring locale sempre disponibile
-// - Gemini se disponibile
-// - OpenRouter come fallback
-//
-// Classificazione:
-// - COMMESSA
-// - CLIENTE DIRETTO
-// - COLLABORAZIONE
-// - ASSUNZIONE
-// ============================================================
+// OCULUS — MOTORE DOMANDA ATTIVA v3
+// Fonti: Freelancer.com (commesse), Remote OK, Remotive, Himalayas.
+// Analisi: scoring locale + Gemini + fallback OpenRouter.
 
 const ANALYSIS_MODEL =
   process.env.GEMINI_MODEL ||
@@ -28,6 +11,9 @@ const ANALYSIS_MODEL =
 const OPENROUTER_MODEL =
   process.env.OPENROUTER_MODEL ||
   "openrouter/free";
+
+const FREELANCER_API =
+  "https://www.freelancer.com/api/projects/0.1/projects/active/";
 
 
 // ============================================================
@@ -59,7 +45,8 @@ function normalize(text) {
 
 
 function clamp(value, min = 0, max = 100) {
-  const n = Number(value);
+  const n =
+    Number(value);
 
   if (!Number.isFinite(n)) {
     return min;
@@ -67,18 +54,21 @@ function clamp(value, min = 0, max = 100) {
 
   return Math.min(
     max,
-    Math.max(min, n)
+    Math.max(
+      min,
+      n
+    )
   );
 }
 
 
 function containsAny(text, words) {
-  const normalized =
+  const n =
     normalize(text);
 
   return words.some(
     (word) =>
-      normalized.includes(
+      n.includes(
         normalize(word)
       )
   );
@@ -108,12 +98,49 @@ function matchesQuery(job, query) {
         .join(" ")
     );
 
+  const stop =
+    new Set([
+      "trova",
+      "cerca",
+      "opportunita",
+      "online",
+      "realizzare",
+      "servizi",
+      "servizio",
+      "clienti",
+      "cliente",
+      "qualcuno",
+      "lavoro",
+      "lavori",
+      "progetto",
+      "progetti",
+      "per",
+      "con",
+      "che",
+      "dei",
+      "delle",
+      "della",
+      "del",
+      "una",
+      "uno",
+      "gli",
+      "le",
+      "and",
+      "the",
+      "for",
+      "with",
+      "from",
+      "remote",
+      "remoto"
+    ]);
+
   const words =
     q
       .split(/\s+/)
       .filter(
-        (word) =>
-          word.length > 2
+        (w) =>
+          w.length > 2 &&
+          !stop.has(w)
       );
 
   if (!words.length) {
@@ -124,6 +151,432 @@ function matchesQuery(job, query) {
     (word) =>
       text.includes(word)
   );
+}
+
+
+function removeDuplicates(items) {
+  const seen =
+    new Set();
+
+  return items.filter(
+    (item) => {
+
+      const key =
+        normalize(
+          [
+            item.url,
+            item.title,
+            item.company
+          ]
+            .filter(Boolean)
+            .join("|")
+        );
+
+      if (
+        !key ||
+        seen.has(key)
+      ) {
+        return false;
+      }
+
+      seen.add(key);
+
+      return true;
+    }
+  );
+}
+
+
+function epochToIso(value) {
+  const n =
+    Number(value);
+
+  if (
+    !Number.isFinite(n) ||
+    n <= 0
+  ) {
+    return null;
+  }
+
+  const ms =
+    n < 1000000000000
+      ? n * 1000
+      : n;
+
+  const d =
+    new Date(ms);
+
+  return Number.isNaN(
+    d.getTime()
+  )
+    ? null
+    : d.toISOString();
+}
+
+
+// ============================================================
+// FREELANCER.COM
+// ============================================================
+
+function buildFreelancerUrl(project) {
+  const seo =
+    (
+      project?.seo_url ||
+      ""
+    )
+      .toString()
+      .trim();
+
+  if (
+    seo.startsWith(
+      "http"
+    )
+  ) {
+    return seo;
+  }
+
+  if (seo) {
+    return (
+      "https://www.freelancer.com/projects/" +
+      seo.replace(
+        /^\/+/,
+        ""
+      )
+    );
+  }
+
+  if (
+    project?.id
+  ) {
+    return (
+      "https://www.freelancer.com/projects/" +
+      project.id
+    );
+  }
+
+  return null;
+}
+
+
+function freelancerLocation(project) {
+  const candidates = [
+    project?.location
+      ?.country?.name,
+
+    project?.location
+      ?.city,
+
+    project?.location
+      ?.country_name,
+
+    project?.country
+      ?.name,
+
+    project?.country_name
+  ].filter(Boolean);
+
+  return candidates.length
+    ? [
+        ...new Set(
+          candidates
+        )
+      ].join(", ")
+    : "Internazionale / Remoto";
+}
+
+
+async function fetchFreelancer(query) {
+  const token =
+    process.env
+      .FREELANCER_API_TOKEN;
+
+  if (!token) {
+    console.warn(
+      "[OCULUS] FREELANCER_API_TOKEN mancante"
+    );
+
+    return [];
+  }
+
+  try {
+    const params =
+      new URLSearchParams();
+
+    params.set(
+      "query",
+      query || ""
+    );
+
+    params.set(
+      "limit",
+      "50"
+    );
+
+    params.set(
+      "compact",
+      "true"
+    );
+
+    params.set(
+      "full_description",
+      "true"
+    );
+
+    params.set(
+      "job_details",
+      "true"
+    );
+
+    params.set(
+      "user_details",
+      "true"
+    );
+
+    const response =
+      await fetch(
+        `${FREELANCER_API}?${params.toString()}`,
+        {
+          method:
+            "GET",
+
+          headers: {
+            "freelancer-oauth-v1":
+              token,
+
+            "User-Agent":
+              "CORTEX-OCULUS/3.0",
+
+            "Accept":
+              "application/json"
+          }
+        }
+      );
+
+    const data =
+      await response
+        .json()
+        .catch(
+          () =>
+            null
+        );
+
+    if (!response.ok) {
+      console.warn(
+        "[OCULUS] Freelancer API:",
+        response.status,
+        data?.message ||
+        data?.error ||
+        ""
+      );
+
+      return [];
+    }
+
+    const projects =
+      Array.isArray(
+        data?.result
+          ?.projects
+      )
+        ? data.result
+            .projects
+        : Array.isArray(
+            data?.projects
+          )
+        ? data.projects
+        : [];
+
+    return projects
+      .map(
+        (project) => {
+
+          const budgetMin =
+            Number(
+              project
+                ?.budget
+                ?.minimum
+            );
+
+          const budgetMax =
+            Number(
+              project
+                ?.budget
+                ?.maximum
+            );
+
+          const currency =
+            project
+              ?.currency
+              ?.code ||
+            project
+              ?.currency
+              ?.sign ||
+            null;
+
+          const tags =
+            Array.isArray(
+              project
+                ?.jobs
+            )
+              ? project.jobs
+                  .map(
+                    (j) =>
+                      j?.name ||
+                      j?.seo_url
+                  )
+                  .filter(
+                    Boolean
+                  )
+              : [];
+
+          const owner =
+            project?.owner ||
+            project
+              ?.owner_details ||
+            null;
+
+          const company =
+            owner
+              ?.display_name ||
+            owner
+              ?.username ||
+            null;
+
+          const bidCount =
+            Number(
+              project
+                ?.bid_stats
+                ?.bid_count ??
+              project
+                ?.bid_count
+            );
+
+          const typeRaw =
+            normalize(
+              project
+                ?.type ||
+              project
+                ?.project_type ||
+              ""
+            );
+
+          const projectType =
+            typeRaw.includes(
+              "hour"
+            )
+              ? "hourly"
+              : "fixed";
+
+          return {
+            source:
+              "Freelancer.com",
+
+            sourceKind:
+              "marketplace",
+
+            forceType:
+              "COMMESSA",
+
+            title:
+              project
+                ?.title ||
+              "Progetto Freelancer",
+
+            company,
+
+            client:
+              company,
+
+            location:
+              freelancerLocation(
+                project
+              ),
+
+            remote:
+              true,
+
+            url:
+              buildFreelancerUrl(
+                project
+              ),
+
+            description:
+              stripHtml(
+                project
+                  ?.description ||
+                project
+                  ?.preview_description ||
+                ""
+              )
+                .slice(
+                  0,
+                  3000
+                ),
+
+            category:
+              "Progetto freelance",
+
+            tags,
+
+            salary:
+              null,
+
+            salaryMin:
+              Number.isFinite(
+                budgetMin
+              ) &&
+              budgetMin > 0
+                ? budgetMin
+                : null,
+
+            salaryMax:
+              Number.isFinite(
+                budgetMax
+              ) &&
+              budgetMax > 0
+                ? budgetMax
+                : null,
+
+            currency,
+
+            publishedAt:
+              epochToIso(
+                project
+                  ?.submitdate ||
+                project
+                  ?.time_submitted
+              ),
+
+            projectType,
+
+            bidCount:
+              Number.isFinite(
+                bidCount
+              )
+                ? bidCount
+                : null,
+
+            freelancerProjectId:
+              project?.id ||
+              null
+          };
+        }
+      )
+      .filter(
+        (item) =>
+          item.title &&
+          item.url
+      );
+
+  } catch (error) {
+
+    console.warn(
+      "[OCULUS] Freelancer non disponibile:",
+      error?.message ||
+      error
+    );
+
+    return [];
+  }
 }
 
 
@@ -139,24 +592,23 @@ async function fetchRemoteOK() {
         {
           headers: {
             "User-Agent":
-              "CORTEX/2.0"
+              "CORTEX/3.0"
           }
         }
       );
 
     if (!response.ok) {
-      console.warn(
-        "[OCULUS] Remote OK:",
-        response.status
-      );
-
       return [];
     }
 
     const data =
       await response.json();
 
-    if (!Array.isArray(data)) {
+    if (
+      !Array.isArray(
+        data
+      )
+    ) {
       return [];
     }
 
@@ -172,14 +624,20 @@ async function fetchRemoteOK() {
           source:
             "Remote OK",
 
+          sourceKind:
+            "job_board",
+
           title:
-            item.position || "",
+            item.position ||
+            "",
 
           company:
-            item.company || null,
+            item.company ||
+            null,
 
           client:
-            item.company || null,
+            item.company ||
+            null,
 
           location:
             item.location ||
@@ -189,18 +647,26 @@ async function fetchRemoteOK() {
             true,
 
           url:
-            item.url || null,
+            item.url ||
+            null,
 
           description:
             stripHtml(
-              item.description || ""
-            ).slice(0, 2200),
+              item.description ||
+              ""
+            )
+              .slice(
+                0,
+                2200
+              ),
 
           category:
             null,
 
           tags:
-            Array.isArray(item.tags)
+            Array.isArray(
+              item.tags
+            )
               ? item.tags
               : [],
 
@@ -208,12 +674,14 @@ async function fetchRemoteOK() {
             null,
 
           salaryMin:
-            Number(item.salary_min) ||
-            null,
+            Number(
+              item.salary_min
+            ) || null,
 
           salaryMax:
-            Number(item.salary_max) ||
-            null,
+            Number(
+              item.salary_max
+            ) || null,
 
           currency:
             item.currency ||
@@ -221,14 +689,22 @@ async function fetchRemoteOK() {
 
           publishedAt:
             item.date ||
+            null,
+
+          projectType:
+            null,
+
+          bidCount:
             null
         })
       );
 
   } catch (error) {
+
     console.warn(
       "[OCULUS] Remote OK non disponibile:",
-      error?.message || error
+      error?.message ||
+      error
     );
 
     return [];
@@ -245,18 +721,16 @@ async function fetchRemotive(query) {
     const url =
       "https://remotive.com/api/remote-jobs" +
       "?search=" +
-      encodeURIComponent(query || "") +
+      encodeURIComponent(
+        query ||
+        ""
+      ) +
       "&limit=50";
 
     const response =
       await fetch(url);
 
     if (!response.ok) {
-      console.warn(
-        "[OCULUS] Remotive:",
-        response.status
-      );
-
       return [];
     }
 
@@ -264,7 +738,9 @@ async function fetchRemotive(query) {
       await response.json();
 
     const jobs =
-      Array.isArray(data?.jobs)
+      Array.isArray(
+        data?.jobs
+      )
         ? data.jobs
         : [];
 
@@ -273,8 +749,12 @@ async function fetchRemotive(query) {
         source:
           "Remotive",
 
+        sourceKind:
+          "job_board",
+
         title:
-          item.title || "",
+          item.title ||
+          "",
 
         company:
           item.company_name ||
@@ -297,15 +777,22 @@ async function fetchRemotive(query) {
 
         description:
           stripHtml(
-            item.description || ""
-          ).slice(0, 2200),
+            item.description ||
+            ""
+          )
+            .slice(
+              0,
+              2200
+            ),
 
         category:
           item.category ||
           null,
 
         tags:
-          Array.isArray(item.tags)
+          Array.isArray(
+            item.tags
+          )
             ? item.tags
             : [],
 
@@ -324,14 +811,22 @@ async function fetchRemotive(query) {
 
         publishedAt:
           item.publication_date ||
+          null,
+
+        projectType:
+          null,
+
+        bidCount:
           null
       })
     );
 
   } catch (error) {
+
     console.warn(
       "[OCULUS] Remotive non disponibile:",
-      error?.message || error
+      error?.message ||
+      error
     );
 
     return [];
@@ -348,17 +843,15 @@ async function fetchHimalayas(query) {
     const url =
       "https://himalayas.app/jobs/api" +
       "?limit=40&q=" +
-      encodeURIComponent(query || "");
+      encodeURIComponent(
+        query ||
+        ""
+      );
 
     const response =
       await fetch(url);
 
     if (!response.ok) {
-      console.warn(
-        "[OCULUS] Himalayas:",
-        response.status
-      );
-
       return [];
     }
 
@@ -366,38 +859,36 @@ async function fetchHimalayas(query) {
       await response.json();
 
     const jobs =
-      Array.isArray(data?.jobs)
+      Array.isArray(
+        data?.jobs
+      )
         ? data.jobs
-        : Array.isArray(data)
+        : Array.isArray(
+            data
+          )
         ? data
         : [];
 
     return jobs
       .map(
         (item) => {
-          let company =
-            null;
 
-          if (
+          const company =
             typeof item.company ===
             "string"
-          ) {
-            company =
-              item.company;
-          } else {
-            company =
-              item.company?.name ||
-              item.companyName ||
-              null;
-          }
+              ? item.company
+              : item.company
+                  ?.name ||
+                item.companyName ||
+                null;
 
           const location =
             Array.isArray(
               item.locationRestrictions
             )
-              ? item.locationRestrictions.join(
-                  ", "
-                )
+              ? item
+                  .locationRestrictions
+                  .join(", ")
               : item.location ||
                 "Da remoto";
 
@@ -405,8 +896,12 @@ async function fetchHimalayas(query) {
             source:
               "Himalayas",
 
+            sourceKind:
+              "job_board",
+
             title:
-              item.title || "",
+              item.title ||
+              "",
 
             company,
 
@@ -429,7 +924,11 @@ async function fetchHimalayas(query) {
                 item.description ||
                 item.excerpt ||
                 ""
-              ).slice(0, 2200),
+              )
+                .slice(
+                  0,
+                  2200
+                ),
 
             category:
               item.category ||
@@ -469,6 +968,12 @@ async function fetchHimalayas(query) {
             publishedAt:
               item.publishedAt ||
               item.createdAt ||
+              null,
+
+            projectType:
+              null,
+
+            bidCount:
               null
           };
         }
@@ -480,9 +985,11 @@ async function fetchHimalayas(query) {
       );
 
   } catch (error) {
+
     console.warn(
       "[OCULUS] Himalayas non disponibile:",
-      error?.message || error
+      error?.message ||
+      error
     );
 
     return [];
@@ -491,55 +998,28 @@ async function fetchHimalayas(query) {
 
 
 // ============================================================
-// DEDUPLICAZIONE
-// ============================================================
-
-function removeDuplicates(items) {
-  const seen =
-    new Set();
-
-  return items.filter(
-    (item) => {
-      const key =
-        normalize(
-          [
-            item.url,
-            item.title,
-            item.company
-          ]
-            .filter(Boolean)
-            .join("|")
-        );
-
-      if (!key) {
-        return false;
-      }
-
-      if (seen.has(key)) {
-        return false;
-      }
-
-      seen.add(key);
-
-      return true;
-    }
-  );
-}
-
-
-// ============================================================
-// TIPO OPPORTUNITA'
+// CLASSIFICAZIONE
 // ============================================================
 
 function classifyOpportunity(job) {
+  if (
+    job.forceType
+  ) {
+    return job.forceType;
+  }
+
   const text =
     normalize(
       [
         job.title,
         job.description,
         job.category,
-        Array.isArray(job.tags)
-          ? job.tags.join(" ")
+        Array.isArray(
+          job.tags
+        )
+          ? job.tags.join(
+              " "
+            )
           : ""
       ]
         .filter(Boolean)
@@ -625,6 +1105,177 @@ function classifyOpportunity(job) {
 
 
 // ============================================================
+// BUDGET / SFORZO / MARGINE
+// ============================================================
+
+function estimateBudgetBand(job) {
+  const min =
+    Number(
+      job.salaryMin
+    );
+
+  const max =
+    Number(
+      job.salaryMax
+    );
+
+  const hasMin =
+    Number.isFinite(min) &&
+    min > 0;
+
+  const hasMax =
+    Number.isFinite(max) &&
+    max > 0;
+
+  const ref =
+    hasMax
+      ? max
+      : hasMin
+      ? min
+      : null;
+
+  if (
+    ref == null
+  ) {
+    return "NON DICHIARATO";
+  }
+
+  if (
+    ref < 250
+  ) {
+    return "MICRO";
+  }
+
+  if (
+    ref < 500
+  ) {
+    return "BASSO";
+  }
+
+  if (
+    ref < 2000
+  ) {
+    return "STANDARD";
+  }
+
+  if (
+    ref < 10000
+  ) {
+    return "PREMIUM";
+  }
+
+  return "HIGH TICKET";
+}
+
+
+function estimateEffort(job) {
+  const text =
+    normalize(
+      `${
+        job.title ||
+        ""
+      } ${
+        job.description ||
+        ""
+      }`
+    );
+
+  const low = [
+    "landing page",
+    "bug fix",
+    "small fix",
+    "minor changes",
+    "simple website",
+    "one page",
+    "logo",
+    "banner"
+  ];
+
+  const high = [
+    "enterprise",
+    "marketplace",
+    "complex platform",
+    "full saas",
+    "mobile app",
+    "large ecommerce",
+    "custom erp",
+    "long term"
+  ];
+
+  if (
+    containsAny(
+      text,
+      high
+    )
+  ) {
+    return "ALTO";
+  }
+
+  if (
+    containsAny(
+      text,
+      low
+    )
+  ) {
+    return "BASSO";
+  }
+
+  return "MEDIO";
+}
+
+
+function estimateMargin(
+  job,
+  automation,
+  effort
+) {
+  const band =
+    estimateBudgetBand(
+      job
+    );
+
+  if (
+    (
+      band ===
+        "STANDARD" ||
+      band ===
+        "PREMIUM" ||
+      band ===
+        "HIGH TICKET"
+    ) &&
+    automation >= 65 &&
+    effort !== "ALTO"
+  ) {
+    return "ALTO";
+  }
+
+  if (
+    (
+      band ===
+        "MICRO" ||
+      band ===
+        "BASSO"
+    ) &&
+    automation >= 80 &&
+    effort === "BASSO"
+  ) {
+    return "ALTO";
+  }
+
+  if (
+    effort ===
+      "ALTO" &&
+    band !==
+      "HIGH TICKET"
+  ) {
+    return "BASSO";
+  }
+
+  return "MEDIO";
+}
+
+
+// ============================================================
 // ANALISI LOCALE
 // ============================================================
 
@@ -635,8 +1286,12 @@ function localAnalysis(job, query) {
         job.title,
         job.description,
         job.category,
-        Array.isArray(job.tags)
-          ? job.tags.join(" ")
+        Array.isArray(
+          job.tags
+        )
+          ? job.tags.join(
+              " "
+            )
           : ""
       ]
         .filter(Boolean)
@@ -659,7 +1314,9 @@ function localAnalysis(job, query) {
     queryWords
   ) {
     if (
-      text.includes(word)
+      text.includes(
+        word
+      )
     ) {
       compatibility +=
         7;
@@ -695,7 +1352,9 @@ function localAnalysis(job, query) {
     cortexSkills
   ) {
     if (
-      text.includes(skill)
+      text.includes(
+        skill
+      )
     ) {
       compatibility +=
         3;
@@ -734,7 +1393,9 @@ function localAnalysis(job, query) {
     automationSignals
   ) {
     if (
-      text.includes(signal)
+      text.includes(
+        signal
+      )
     ) {
       automation +=
         4;
@@ -754,39 +1415,28 @@ function localAnalysis(job, query) {
     );
 
   let commercialProbability =
-    30;
+    type ===
+      "COMMESSA"
+      ? 85
+      : type ===
+        "CLIENTE DIRETTO"
+      ? 70
+      : type ===
+        "COLLABORAZIONE"
+      ? 55
+      : 20;
 
   if (
-    type ===
-    "COMMESSA"
+    compatibility >=
+    80
   ) {
-    commercialProbability =
-      85;
-  }
-
-  else if (
-    type ===
-    "CLIENTE DIRETTO"
-  ) {
-    commercialProbability =
-      70;
-  }
-
-  else if (
-    type ===
-    "COLLABORAZIONE"
-  ) {
-    commercialProbability =
-      55;
-  }
-
-  else {
-    commercialProbability =
-      20;
+    commercialProbability +=
+      5;
   }
 
   if (
-    compatibility >= 80
+    job.source ===
+    "Freelancer.com"
   ) {
     commercialProbability +=
       5;
@@ -797,18 +1447,49 @@ function localAnalysis(job, query) {
       commercialProbability
     );
 
+  const budgetBand =
+    estimateBudgetBand(
+      job
+    );
+
+  const effort =
+    estimateEffort(
+      job
+    );
+
+  const marginPotential =
+    estimateMargin(
+      job,
+      automation,
+      effort
+    );
+
   let revenuePotential =
     "MEDIO";
 
   if (
-    type === "COMMESSA" &&
-    compatibility >= 70
+    [
+      "PREMIUM",
+      "HIGH TICKET"
+    ].includes(
+      budgetBand
+    )
   ) {
     revenuePotential =
       "ALTO";
   }
 
-  if (
+  else if (
+    budgetBand ===
+      "STANDARD" &&
+    type ===
+      "COMMESSA"
+  ) {
+    revenuePotential =
+      "ALTO";
+  }
+
+  else if (
     type ===
     "ASSUNZIONE"
   ) {
@@ -816,10 +1497,21 @@ function localAnalysis(job, query) {
       "BASSO";
   }
 
-  let urgency =
-    "MEDIA";
+  else if (
+    [
+      "MICRO",
+      "BASSO"
+    ].includes(
+      budgetBand
+    ) &&
+    marginPotential !==
+      "ALTO"
+  ) {
+    revenuePotential =
+      "BASSO";
+  }
 
-  if (
+  let urgency =
     containsAny(
       text,
       [
@@ -831,17 +1523,17 @@ function localAnalysis(job, query) {
         "start immediately"
       ]
     )
-  ) {
-    urgency =
-      "ALTA";
-  }
+      ? "ALTA"
+      : "MEDIA";
 
   let priority =
     "MEDIA";
 
   if (
-    commercialProbability >= 75 &&
-    compatibility >= 65
+    commercialProbability >=
+      75 &&
+    compatibility >=
+      65
   ) {
     priority =
       "ALTA";
@@ -857,6 +1549,22 @@ function localAnalysis(job, query) {
       "BASSA";
   }
 
+  if (
+    [
+      "MICRO",
+      "BASSO"
+    ].includes(
+      budgetBand
+    ) &&
+    effort ===
+      "BASSO" &&
+    automation >=
+      80
+  ) {
+    priority =
+      "ALTA";
+  }
+
   let recommendedAction =
     "Aprire la fonte e verificare requisiti e modalità di contatto.";
 
@@ -865,7 +1573,7 @@ function localAnalysis(job, query) {
     "COMMESSA"
   ) {
     recommendedAction =
-      "Preparare una proposta commerciale personalizzata e contattare il cliente.";
+      "Preparare una proposta personalizzata e candidarsi rapidamente sulla piattaforma.";
   }
 
   else if (
@@ -897,48 +1605,117 @@ function localAnalysis(job, query) {
     revenuePotential,
     urgency,
     priority,
+    budgetBand,
+    effort,
+    marginPotential,
     recommendedAction
   };
 }
 
 
 // ============================================================
-// PUNTEGGIO OPPORTUNITA'
+// RANKING
 // ============================================================
 
 function calculateOpportunityScore(job) {
   const revenueValues = {
-    ALTO: 100,
-    MEDIO: 60,
-    BASSO: 25
+    ALTO:
+      100,
+
+    MEDIO:
+      60,
+
+    BASSO:
+      25
   };
 
   const urgencyValues = {
-    ALTA: 100,
-    MEDIA: 60,
-    BASSA: 25
+    ALTA:
+      100,
+
+    MEDIA:
+      60,
+
+    BASSA:
+      25
+  };
+
+  const marginValues = {
+    ALTO:
+      100,
+
+    MEDIO:
+      60,
+
+    BASSO:
+      20
   };
 
   const typeBonus = {
-    COMMESSA: 20,
-    "CLIENTE DIRETTO": 15,
-    COLLABORAZIONE: 5,
-    ASSUNZIONE: -15
+    COMMESSA:
+      20,
+
+    "CLIENTE DIRETTO":
+      15,
+
+    COLLABORAZIONE:
+      5,
+
+    ASSUNZIONE:
+      -15
   };
+
+  const sourceBonus =
+    job.source ===
+    "Freelancer.com"
+      ? 10
+      : 0;
+
+  const budgetBonus =
+    job.budgetBand ===
+      "HIGH TICKET"
+      ? 10
+      : job.budgetBand ===
+        "PREMIUM"
+      ? 8
+      : job.budgetBand ===
+        "STANDARD"
+      ? 5
+      : 0;
+
+  const microEfficiencyBonus =
+    [
+      "MICRO",
+      "BASSO"
+    ].includes(
+      job.budgetBand
+    ) &&
+    job.effort ===
+      "BASSO" &&
+    job.automation >=
+      80
+      ? 8
+      : 0;
 
   const score =
     job.compatibility *
-      0.30 +
-    job.automation *
       0.20 +
+    job.automation *
+      0.15 +
     job.commercialProbability *
-      0.30 +
+      0.25 +
+    (
+      marginValues[
+        job.marginPotential
+      ] || 0
+    ) *
+      0.20 +
     (
       revenueValues[
         job.revenuePotential
       ] || 0
     ) *
-      0.15 +
+      0.10 +
     (
       urgencyValues[
         job.urgency
@@ -946,13 +1723,23 @@ function calculateOpportunityScore(job) {
     ) *
       0.05 +
     (
+      job.remote
+        ? 100
+        : 60
+    ) *
+      0.05 +
+    (
       typeBonus[
         job.type
       ] || 0
-    );
+    ) +
+    sourceBonus +
+    budgetBonus +
+    microEfficiencyBonus;
 
   return Math.round(
-    score * 100
+    score *
+      100
   ) / 100;
 }
 
@@ -972,43 +1759,63 @@ function buildAnalysisPrompt(
         index
       ) => ({
         index,
+
         titolo:
           job.title,
+
         azienda:
           job.company,
+
         fonte:
           job.source,
+
         descrizione:
-          job.description.slice(
-            0,
-            700
-          ),
+          job.description
+            .slice(
+              0,
+              700
+            ),
+
         tipoStimato:
-          job.type
+          job.type,
+
+        budgetMin:
+          job.salaryMin,
+
+        budgetMax:
+          job.salaryMax,
+
+        valuta:
+          job.currency,
+
+        fasciaBudget:
+          job.budgetBand,
+
+        sforzoStimato:
+          job.effort,
+
+        margineStimato:
+          job.marginPotential
       })
     );
 
   return `
 Sei OCULUS, analista commerciale di CORTEX.
 
-L'obiettivo NON è semplicemente trovare offerte di lavoro.
-Devi capire quali opportunità possono trasformarsi in ricavi attraverso
-servizi digitali, siti web, Shopify, e-commerce, AI, automazioni,
-marketing, social media e produzione di contenuti.
+L'obiettivo principale è trovare COMMESSE e CLIENTI DIRETTI che possano generare ricavi tramite siti web, Shopify, e-commerce, AI, automazioni, marketing, social e contenuti.
+
+Le normali ASSUNZIONI hanno priorità inferiore.
 
 Ricerca utente:
 "${query}"
 
-Classifica ogni risultato come:
+Regola economica:
+preferisci in genere progetti da 500 EUR in su, ma NON scartare progetti sotto 500 EUR se sono semplici, veloci, fortemente automatizzabili e con buon margine.
 
-COMMESSA
-CLIENTE DIRETTO
-COLLABORAZIONE
-ASSUNZIONE
+Non inventare budget.
+Se non è dichiarato, lascialo come non dichiarato.
 
-Le COMMESSE e i CLIENTI DIRETTI devono essere privilegiati.
-
-Restituisci ESCLUSIVAMENTE JSON valido:
+Restituisci SOLO JSON valido:
 
 {
   "results": [
@@ -1016,19 +1823,18 @@ Restituisci ESCLUSIVAMENTE JSON valido:
       "index": 0,
       "compatibilita": 0,
       "automatizzabilita": 0,
-      "tipo": "ASSUNZIONE",
+      "tipo": "COMMESSA",
       "probabilitaCommerciale": 0,
-      "potenzialeRicavo": "BASSO",
+      "potenzialeRicavo": "MEDIO",
       "urgenza": "MEDIA",
-      "priorita": "BASSA",
+      "priorita": "MEDIA",
+      "sforzo": "MEDIO",
+      "marginePotenziale": "MEDIO",
       "motivazione": "",
       "azioneConsigliata": ""
     }
   ]
 }
-
-Non inventare opportunità.
-Analizza esclusivamente quelle fornite.
 
 OPPORTUNITA:
 ${JSON.stringify(data)}
@@ -1111,8 +1917,9 @@ async function analyzeWithGemini(
       console.warn(
         "[OCULUS] Gemini non disponibile:",
         response.status,
-        data?.error?.message ||
-          ""
+        data?.error
+          ?.message ||
+        ""
       );
 
       return null;
@@ -1120,30 +1927,32 @@ async function analyzeWithGemini(
 
     const raw =
       (
-        data?.candidates?.[0]
-          ?.content?.parts ||
+        data
+          ?.candidates?.[0]
+          ?.content
+          ?.parts ||
         []
       )
         .map(
           (part) =>
-            part.text || ""
+            part.text ||
+            ""
         )
         .join("")
         .trim();
 
-    if (!raw) {
-      return null;
-    }
-
-    return JSON.parse(
-      raw
-    );
+    return raw
+      ? JSON.parse(
+          raw
+        )
+      : null;
 
   } catch (error) {
+
     console.warn(
       "[OCULUS] Errore analisi Gemini:",
       error?.message ||
-        error
+      error
     );
 
     return null;
@@ -1229,8 +2038,9 @@ async function analyzeWithOpenRouter(
       console.warn(
         "[OCULUS] OpenRouter non disponibile:",
         response.status,
-        data?.error?.message ||
-          ""
+        data?.error
+          ?.message ||
+        ""
       );
 
       return null;
@@ -1238,10 +2048,13 @@ async function analyzeWithOpenRouter(
 
     let raw =
       data?.choices?.[0]
-        ?.message?.content;
+        ?.message
+        ?.content;
 
     if (
-      Array.isArray(raw)
+      Array.isArray(
+        raw
+      )
     ) {
       raw =
         raw
@@ -1272,19 +2085,18 @@ async function analyzeWithOpenRouter(
         )
         .trim();
 
-    if (!raw) {
-      return null;
-    }
-
-    return JSON.parse(
-      raw
-    );
+    return raw
+      ? JSON.parse(
+          raw
+        )
+      : null;
 
   } catch (error) {
+
     console.warn(
       "[OCULUS] Errore analisi OpenRouter:",
       error?.message ||
-        error
+      error
     );
 
     return null;
@@ -1332,7 +2144,9 @@ function applyAIAnalysis(
     analysis.results
   ) {
     const index =
-      Number(ai.index);
+      Number(
+        ai.index
+      );
 
     if (
       !Number.isInteger(
@@ -1366,10 +2180,13 @@ function applyAIAnalysis(
         );
     }
 
+    // I progetti Freelancer restano COMMESSE.
     if (
       validTypes.includes(
         ai.tipo
-      )
+      ) &&
+      job.source !==
+        "Freelancer.com"
     ) {
       job.type =
         ai.tipo;
@@ -1413,6 +2230,24 @@ function applyAIAnalysis(
     }
 
     if (
+      validLevels.includes(
+        ai.sforzo
+      )
+    ) {
+      job.effort =
+        ai.sforzo;
+    }
+
+    if (
+      validLevels.includes(
+        ai.marginePotenziale
+      )
+    ) {
+      job.marginPotential =
+        ai.marginePotenziale;
+    }
+
+    if (
       ai.motivazione
     ) {
       job.reason =
@@ -1430,6 +2265,86 @@ function applyAIAnalysis(
         );
     }
   }
+}
+
+
+// ============================================================
+// FILTRO GEOGRAFICO
+// ============================================================
+
+function regionMatches(
+  job,
+  region
+) {
+  const mode =
+    normalize(
+      region ||
+      "tutto"
+    );
+
+  if (
+    !mode ||
+    mode ===
+      "tutto" ||
+    mode ===
+      "all"
+  ) {
+    return true;
+  }
+
+  const loc =
+    normalize(
+      job.location
+    );
+
+  if (
+    mode ===
+      "italia" ||
+    mode ===
+      "italy"
+  ) {
+    return (
+      /italia|italy|italian/.test(
+        loc
+      )
+    );
+  }
+
+  if (
+    mode ===
+      "europa" ||
+    mode ===
+      "europe"
+  ) {
+    return (
+      /europe|europa|italy|italia|france|germany|spain|portugal|netherlands|belgium|austria|switzerland|poland|romania|greece|ireland|sweden|norway|denmark|finland|croatia|slovenia|czech|hungary/.test(
+        loc
+      )
+    );
+  }
+
+  if (
+    mode ===
+      "remoto" ||
+    mode ===
+      "remote"
+  ) {
+    return (
+      job.remote !==
+      false
+    );
+  }
+
+  if (
+    mode ===
+      "internazionale" ||
+    mode ===
+      "international"
+  ) {
+    return true;
+  }
+
+  return true;
 }
 
 
@@ -1475,36 +2390,46 @@ export async function searchPaidDemand(
       20
     );
 
-  try {
-    // ------------------------------------------------------------
-    // FONTI
-    // ------------------------------------------------------------
+  const region =
+    (
+      body.region ||
+      body.area ||
+      body.locationMode ||
+      "TUTTO"
+    )
+      .toString()
+      .trim();
 
+  try {
     const [
+      freelancer,
       remoteOK,
       remotive,
       himalayas
     ] =
       await Promise.all([
+        fetchFreelancer(
+          service
+        ),
+
         fetchRemoteOK(),
+
         fetchRemotive(
           service
         ),
+
         fetchHimalayas(
           service
         )
       ]);
 
-    let jobs = [
-      ...remoteOK,
-      ...remotive,
-      ...himalayas
-    ];
-
-    jobs =
-      removeDuplicates(
-        jobs
-      );
+    let jobs =
+      removeDuplicates([
+        ...freelancer,
+        ...remoteOK,
+        ...remotive,
+        ...himalayas
+      ]);
 
     jobs =
       jobs.filter(
@@ -1513,16 +2438,21 @@ export async function searchPaidDemand(
           matchesQuery(
             job,
             service
+          ) &&
+          regionMatches(
+            job,
+            region
           )
       );
 
-    // ------------------------------------------------------------
+    // ============================================================
     // SCORING LOCALE
-    // ------------------------------------------------------------
+    // ============================================================
 
     jobs =
       jobs.map(
         (job) => {
+
           const analysis =
             localAnalysis(
               job,
@@ -1544,21 +2474,23 @@ export async function searchPaidDemand(
       );
 
     jobs.sort(
-      (a, b) =>
+      (
+        a,
+        b
+      ) =>
         b.opportunityScore -
         a.opportunityScore
     );
 
-    // Limitiamo i dati mandati all'AI.
     jobs =
       jobs.slice(
         0,
-        20
+        24
       );
 
-    // ------------------------------------------------------------
-    // ANALISI AI
-    // ------------------------------------------------------------
+    // ============================================================
+    // AI ANALYSIS
+    // ============================================================
 
     let aiProvider =
       "locale";
@@ -1569,19 +2501,25 @@ export async function searchPaidDemand(
         service
       );
 
-    if (aiAnalysis) {
+    if (
+      aiAnalysis
+    ) {
       aiProvider =
         "gemini";
     }
 
-    if (!aiAnalysis) {
+    if (
+      !aiAnalysis
+    ) {
       aiAnalysis =
         await analyzeWithOpenRouter(
           jobs,
           service
         );
 
-      if (aiAnalysis) {
+      if (
+        aiAnalysis
+      ) {
         aiProvider =
           "openrouter";
       }
@@ -1592,12 +2530,13 @@ export async function searchPaidDemand(
       aiAnalysis
     );
 
-    // ------------------------------------------------------------
+    // ============================================================
     // RANKING FINALE
-    // ------------------------------------------------------------
+    // ============================================================
 
     for (
-      const job of jobs
+      const job of
+      jobs
     ) {
       job.opportunityScore =
         calculateOpportunityScore(
@@ -1606,14 +2545,17 @@ export async function searchPaidDemand(
     }
 
     jobs.sort(
-      (a, b) =>
+      (
+        a,
+        b
+      ) =>
         b.opportunityScore -
         a.opportunityScore
     );
 
-    // ------------------------------------------------------------
+    // ============================================================
     // OUTPUT
-    // ------------------------------------------------------------
+    // ============================================================
 
     const results =
       jobs
@@ -1626,6 +2568,7 @@ export async function searchPaidDemand(
             job,
             index
           ) => {
+
             let budget =
               job.salary ||
               null;
@@ -1667,8 +2610,27 @@ export async function searchPaidDemand(
 
               budget,
 
+              budgetMin:
+                job.salaryMin ||
+                null,
+
+              budgetMax:
+                job.salaryMax ||
+                null,
+
+              fasciaBudget:
+                job.budgetBand,
+
               valuta:
                 job.currency ||
+                null,
+
+              tipoProgetto:
+                job.projectType ||
+                null,
+
+              numeroOfferte:
+                job.bidCount ??
                 null,
 
               localita:
@@ -1703,6 +2665,12 @@ export async function searchPaidDemand(
 
               potenzialeRicavo:
                 job.revenuePotential,
+
+              sforzoStimato:
+                job.effort,
+
+              marginePotenziale:
+                job.marginPotential,
 
               urgenza:
                 job.urgency,
@@ -1761,6 +2729,13 @@ export async function searchPaidDemand(
           (x) =>
             x.priorita ===
             "ALTA"
+        ).length,
+
+      daFreelancer:
+        results.filter(
+          (x) =>
+            x.fonte ===
+            "Freelancer.com"
         ).length
     };
 
@@ -1774,19 +2749,37 @@ export async function searchPaidDemand(
           "domanda_attiva",
 
         versione:
-          "2.0",
+          "3.0",
 
         ricerca:
           service,
+
+        regione:
+          region,
 
         analisi:
           aiProvider,
 
         fonti: [
+          "Freelancer.com",
           "Remote OK",
           "Remotive",
           "Himalayas"
         ],
+
+        disponibilitaFonti: {
+          freelancer:
+            freelancer.length,
+
+          remoteOK:
+            remoteOK.length,
+
+          remotive:
+            remotive.length,
+
+          himalayas:
+            himalayas.length
+        },
 
         numeroRisultati:
           results.length,
@@ -1797,6 +2790,7 @@ export async function searchPaidDemand(
       });
 
   } catch (error) {
+
     console.error(
       "[OCULUS / DOMANDA ATTIVA]",
       error
