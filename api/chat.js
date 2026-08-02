@@ -289,16 +289,11 @@ export default async function handler(req, res) {
     }
 
     // ============================================================
-    // OCULUS — DOMANDA ATTIVA · REMOTE OK  (NEW)
-    // Job board pubblico, nessuna chiave. Filtro categorie X Studio:
-    // web/dev, design, social/marketing, video/motion, branding.
+    // OCULUS — REMOTE OK (Remotive)
     // ============================================================
-    // ============================================================
-// OCULUS — REMOTE OK
-// ============================================================
-if (body.action === "remoteok") {
-    return searchRemotive(body, res);
-}
+    if (body.action === "remoteok") {
+      return searchRemotive(body, res);
+    }
 
     // ============================================================
     // NOTION — FUNZIONI COMUNI
@@ -928,7 +923,7 @@ if (body.action === "remoteok") {
     }
 
     // ============================================================
-    // CHAT DEGLI AGENTI — GEMINI + FALLBACK OPENROUTER
+    // CHAT DEGLI AGENTI — GEMINI + FALLBACK OPENROUTER + GROQ
     // ============================================================
     const { system, messages } = body;
 
@@ -1006,6 +1001,19 @@ if (body.action === "remoteok") {
         out.push({ role, content: content.length ? content : "" });
       }
       return out;
+    };
+
+    // Groq accetta solo stringhe come content: appiattisco i blocchi.
+    const toGroqMessages = (inputMessages) => {
+      const flat = toOpenRouterMessages(inputMessages);
+      return flat.map((m) => {
+        if (typeof m.content === "string") return m;
+        const text = (m.content || [])
+          .map((c) => (typeof c === "string" ? c : c?.text || ""))
+          .join(" ")
+          .trim();
+        return { role: m.role, content: text };
+      });
     };
 
     // PROVIDER 1 — GEMINI
@@ -1117,7 +1125,62 @@ if (body.action === "remoteok") {
       }
     };
 
-    // CORTEX AI ROUTER
+    // PROVIDER 3 — GROQ (veloce, quota giornaliera gratuita, OpenAI-compatibile)
+    const callGroq = async () => {
+      const key = process.env.GROQ_API_KEY;
+      if (!key) {
+        return { ok: false, status: 503, error: "GROQ_API_KEY mancante" };
+      }
+
+      try {
+        const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${key}`
+          },
+          body: JSON.stringify({
+            model: process.env.GROQ_MODEL || "llama-3.3-70b-versatile",
+            messages: toGroqMessages(messages),
+            temperature: 0.7,
+            max_tokens: 4096,
+            stream: false
+          })
+        });
+        const data = await r.json();
+        if (!r.ok) {
+          return {
+            ok: false,
+            status: r.status,
+            error: data?.error?.message || "Errore Groq",
+            raw: data
+          };
+        }
+
+        let text = data?.choices?.[0]?.message?.content;
+        if (Array.isArray(text)) {
+          text = text
+            .map((part) => (typeof part === "string" ? part : part?.text || ""))
+            .join("");
+        }
+        text = (text || "").toString().trim();
+
+        if (!text) {
+          return { ok: false, status: 502, error: "Groq non ha restituito testo" };
+        }
+
+        return {
+          ok: true,
+          provider: "groq",
+          model: data?.model || process.env.GROQ_MODEL || "llama-3.3-70b-versatile",
+          text
+        };
+      } catch (error) {
+        return { ok: false, status: 503, error: error?.message || "Groq non raggiungibile" };
+      }
+    };
+
+    // CORTEX AI ROUTER — Gemini → OpenRouter → Groq
     const gemini = await callGemini();
 
     if (gemini.ok) {
@@ -1143,15 +1206,32 @@ if (body.action === "remoteok") {
       });
     }
 
-    console.error(
-      "[CORTEX AI ROUTER] Anche OpenRouter non disponibile:",
+    console.warn(
+      "[CORTEX AI ROUTER] OpenRouter non disponibile:",
       openrouter.status,
       openrouter.error
     );
 
-    return res.status(openrouter.status || gemini.status || 503).json({
+    const groq = await callGroq();
+
+    if (groq.ok) {
+      return res.status(200).json({
+        content: [{ type: "text", text: groq.text }],
+        provider: groq.provider,
+        model: groq.model,
+        fallback: true,
+        fallbackReason: openrouter.error || gemini.error
+      });
+    }
+
+    console.error(
+      "[CORTEX AI ROUTER] Nessun motore disponibile:",
+      "gemini=", gemini.error, "| openrouter=", openrouter.error, "| groq=", groq.error
+    );
+
+    return res.status(groq.status || openrouter.status || gemini.status || 503).json({
       error: "Nessun motore AI disponibile in questo momento.",
-      details: { gemini: gemini.error, openrouter: openrouter.error }
+      details: { gemini: gemini.error, openrouter: openrouter.error, groq: groq.error }
     });
   } catch (e) {
     return res.status(500).json({ error: String(e && e.message ? e.message : e) });
