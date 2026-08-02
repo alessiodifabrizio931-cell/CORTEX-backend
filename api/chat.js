@@ -289,6 +289,81 @@ export default async function handler(req, res) {
     }
 
     // ============================================================
+    // NERVUS — CANDELE STORICHE (Twelve Data) per forex/oro/indici/azioni
+    // Restituisce OHLC giornaliero per calcolare setup, RSI, ATR lato frontend.
+    // ============================================================
+    if (body.action === "market_series") {
+      const key = process.env.TWELVEDATA_API_KEY;
+      if (!key) {
+        return res.status(500).json({ error: "TWELVEDATA_API_KEY mancante" });
+      }
+      const symbol = (body.symbol || "").toString().trim().toUpperCase();
+      if (!symbol) {
+        return res.status(400).json({ error: "symbol mancante" });
+      }
+      const outputsize = Math.min(Math.max(parseInt(body.outputsize) || 60, 20), 200);
+
+      try {
+        // quote (prezzo, variazione, high/low, volume)
+        const qUrl =
+          "https://api.twelvedata.com/quote?symbol=" +
+          encodeURIComponent(symbol) +
+          "&apikey=" +
+          key;
+        // serie giornaliera (candele)
+        const tsUrl =
+          "https://api.twelvedata.com/time_series?symbol=" +
+          encodeURIComponent(symbol) +
+          "&interval=1day&outputsize=" +
+          outputsize +
+          "&order=ASC&apikey=" +
+          key;
+
+        const [q, ts] = await Promise.all([
+          fetch(qUrl).then((r) => r.json()),
+          fetch(tsUrl).then((r) => r.json())
+        ]);
+
+        if (ts.status === "error" || ts.code) {
+          return res.status(400).json({ error: ts.message || "Simbolo non valido su Twelve Data" });
+        }
+
+        const values = Array.isArray(ts.values) ? ts.values : [];
+        const candles = values.map((v) => ({
+          time: v.datetime,
+          open: Number(v.open),
+          high: Number(v.high),
+          low: Number(v.low),
+          close: Number(v.close),
+          volume: v.volume != null ? Number(v.volume) : null
+        }));
+
+        const quote =
+          q && !q.code && q.status !== "error"
+            ? {
+                price: q.close != null ? Number(q.close) : null,
+                changePct: q.percent_change != null ? Number(q.percent_change) : null,
+                high: q.high != null ? Number(q.high) : null,
+                low: q.low != null ? Number(q.low) : null,
+                volume: q.volume != null ? Number(q.volume) : null,
+                name: q.name || null,
+                exchange: q.exchange || null
+              }
+            : null;
+
+        return res.status(200).json({
+          ok: true,
+          source: "Twelve Data",
+          symbol,
+          quote,
+          candles
+        });
+      } catch (e) {
+        return res.status(500).json({ error: String(e.message || e) });
+      }
+    }
+
+    // ============================================================
     // OCULUS — REMOTE OK (Remotive)
     // ============================================================
     if (body.action === "remoteok") {
