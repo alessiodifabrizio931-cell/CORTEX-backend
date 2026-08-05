@@ -364,6 +364,253 @@ export default async function handler(req, res) {
     }
 
     // ============================================================
+    // NERVUS — CANDELE ALPHA VANTAGE (azioni/forex/indici) — fallback Twelve Data
+    // ============================================================
+    if (body.action === "market_av") {
+      const key = process.env.ALPHAVANTAGE_API_KEY;
+      if (!key) {
+        return res.status(500).json({ error: "ALPHAVANTAGE_API_KEY mancante" });
+      }
+      const symbol = (body.symbol || "").toString().trim().toUpperCase();
+      if (!symbol) {
+        return res.status(400).json({ error: "symbol mancante" });
+      }
+      const isFx = symbol.includes("/");
+
+      try {
+        let candles = [];
+        let quote = null;
+
+        if (isFx) {
+          const parts = symbol.split("/");
+          const from = parts[0];
+          const to = parts[1] || "USD";
+          const url =
+            "https://www.alphavantage.co/query?function=FX_DAILY&from_symbol=" +
+            encodeURIComponent(from) +
+            "&to_symbol=" +
+            encodeURIComponent(to) +
+            "&outputsize=compact&apikey=" +
+            key;
+          const d = await fetch(url).then((r) => r.json());
+          if (d.Note || d.Information) {
+            return res.status(429).json({ error: "Limite Alpha Vantage raggiunto, riprova più tardi." });
+          }
+          const ts = d["Time Series FX (Daily)"] || {};
+          candles = Object.keys(ts)
+            .sort()
+            .map((time) => ({
+              time,
+              open: Number(ts[time]["1. open"]),
+              high: Number(ts[time]["2. high"]),
+              low: Number(ts[time]["3. low"]),
+              close: Number(ts[time]["4. close"]),
+              volume: null
+            }));
+          if (candles.length) {
+            const last = candles[candles.length - 1];
+            const prev = candles[candles.length - 2] || last;
+            quote = {
+              price: last.close,
+              changePct: prev.close ? ((last.close - prev.close) / prev.close) * 100 : null,
+              high: last.high,
+              low: last.low,
+              volume: null,
+              name: from + "/" + to
+            };
+          }
+        } else {
+          const tsUrl =
+            "https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=" +
+            encodeURIComponent(symbol) +
+            "&outputsize=compact&apikey=" +
+            key;
+          const qUrl =
+            "https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=" +
+            encodeURIComponent(symbol) +
+            "&apikey=" +
+            key;
+          const [tsRes, qRes] = await Promise.all([
+            fetch(tsUrl).then((r) => r.json()),
+            fetch(qUrl).then((r) => r.json())
+          ]);
+          if (tsRes.Note || tsRes.Information) {
+            return res.status(429).json({ error: "Limite Alpha Vantage raggiunto, riprova più tardi." });
+          }
+          const ts = tsRes["Time Series (Daily)"] || {};
+          candles = Object.keys(ts)
+            .sort()
+            .map((time) => ({
+              time,
+              open: Number(ts[time]["1. open"]),
+              high: Number(ts[time]["2. high"]),
+              low: Number(ts[time]["3. low"]),
+              close: Number(ts[time]["4. close"]),
+              volume: ts[time]["5. volume"] != null ? Number(ts[time]["5. volume"]) : null
+            }));
+          const gq = qRes["Global Quote"] || {};
+          const gqPrice = gq["05. price"] != null ? Number(gq["05. price"]) : null;
+          const gqChange =
+            gq["10. change percent"] != null ? parseFloat(gq["10. change percent"]) : null;
+          quote = {
+            price: gqPrice != null ? gqPrice : candles.length ? candles[candles.length - 1].close : null,
+            changePct: gqChange,
+            high: gq["03. high"] != null ? Number(gq["03. high"]) : null,
+            low: gq["04. low"] != null ? Number(gq["04. low"]) : null,
+            volume: gq["06. volume"] != null ? Number(gq["06. volume"]) : null,
+            name: symbol
+          };
+        }
+
+        if (!candles.length) {
+          return res.status(400).json({ error: "Nessun dato Alpha Vantage per " + symbol });
+        }
+
+        return res.status(200).json({
+          ok: true,
+          source: "Alpha Vantage",
+          symbol,
+          quote,
+          candles
+        });
+      } catch (e) {
+        return res.status(500).json({ error: String(e.message || e) });
+      }
+    }
+
+    // ============================================================
+    // TAVILY — RICERCA WEB REALE (HELIOS / CODEX)
+    // ============================================================
+    if (body.action === "websearch") {
+      const key = process.env.TAVILY_API_KEY;
+      if (!key) {
+        return res.status(500).json({ error: "TAVILY_API_KEY mancante" });
+      }
+      const query = (body.query || "").toString().trim();
+      if (!query) {
+        return res.status(400).json({ error: "query mancante" });
+      }
+      const max = Math.min(Math.max(parseInt(body.max_results) || 6, 1), 10);
+      try {
+        const r = await fetch("https://api.tavily.com/search", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            api_key: key,
+            query,
+            search_depth: body.deep ? "advanced" : "basic",
+            max_results: max,
+            include_answer: true
+          })
+        });
+        const d = await r.json();
+        if (!r.ok) {
+          return res.status(r.status).json({ error: d?.error || "Errore Tavily" });
+        }
+        const results = (d.results || []).map((x) => ({
+          title: x.title || "",
+          url: x.url || "",
+          content: (x.content || "").toString().slice(0, 500),
+          score: x.score || null
+        }));
+        return res.status(200).json({
+          ok: true,
+          source: "Tavily",
+          query,
+          answer: d.answer || null,
+          results
+        });
+      } catch (e) {
+        return res.status(500).json({ error: String(e.message || e) });
+      }
+    }
+
+    // ============================================================
+    // FIRECRAWL — SCRAPING SITO / URL (CODEX)
+    // ============================================================
+    if (body.action === "scrape") {
+      const key = process.env.FIRECRAWL_API_KEY;
+      if (!key) {
+        return res.status(500).json({ error: "FIRECRAWL_API_KEY mancante" });
+      }
+      const url = (body.url || "").toString().trim();
+      if (!url || !/^https?:\/\//.test(url)) {
+        return res.status(400).json({ error: "url mancante o non valido (deve iniziare con http/https)" });
+      }
+      try {
+        const r = await fetch("https://api.firecrawl.dev/v1/scrape", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${key}`
+          },
+          body: JSON.stringify({ url, formats: ["markdown"], onlyMainContent: true })
+        });
+        const d = await r.json();
+        if (!r.ok || d.success === false) {
+          return res.status(r.status || 502).json({ error: d?.error || "Errore Firecrawl" });
+        }
+        const data = d.data || {};
+        const md = (data.markdown || "").toString();
+        const meta = data.metadata || {};
+        return res.status(200).json({
+          ok: true,
+          source: "Firecrawl",
+          url,
+          title: meta.title || meta.ogTitle || url,
+          description: meta.description || "",
+          markdown: md.slice(0, 12000),
+          truncated: md.length > 12000
+        });
+      } catch (e) {
+        return res.status(500).json({ error: String(e.message || e) });
+      }
+    }
+
+    // ============================================================
+    // COINDESK DATA — PREZZO/INDICE BTC (NERVUS) — richiede chiave attiva
+    // ============================================================
+    if (body.action === "coindesk") {
+      const key = process.env.COINDESK_API_KEY;
+      if (!key) {
+        return res.status(500).json({ error: "COINDESK_API_KEY mancante" });
+      }
+      const fsym = (body.symbol || "BTC").toString().trim().toUpperCase().replace(/USDT?$/, "");
+      const tsym = (body.vs || "USD").toString().trim().toUpperCase();
+      try {
+        const r = await fetch(
+          "https://min-api.cryptocompare.com/data/pricemultifull?fsyms=" +
+            encodeURIComponent(fsym) +
+            "&tsyms=" +
+            encodeURIComponent(tsym),
+          { headers: { authorization: "Apikey " + key } }
+        );
+        const d = await r.json();
+        if (d.Response === "Error") {
+          return res.status(400).json({ error: d.Message || "Errore CoinDesk Data" });
+        }
+        const raw = d?.RAW?.[fsym]?.[tsym];
+        if (!raw) {
+          return res.status(404).json({ error: "Nessun dato CoinDesk per " + fsym + "/" + tsym });
+        }
+        return res.status(200).json({
+          ok: true,
+          source: "CoinDesk Data",
+          symbol: fsym + "/" + tsym,
+          price: raw.PRICE ?? null,
+          changePct: raw.CHANGEPCT24HOUR ?? null,
+          high: raw.HIGH24HOUR ?? null,
+          low: raw.LOW24HOUR ?? null,
+          volume: raw.TOTALVOLUME24HTO ?? null,
+          supply: raw.SUPPLY ?? null,
+          mktcap: raw.MKTCAP ?? null
+        });
+      } catch (e) {
+        return res.status(500).json({ error: String(e.message || e) });
+      }
+    }
+
+    // ============================================================
     // OCULUS — REMOTE OK (Remotive)
     // ============================================================
     if (body.action === "remoteok") {
