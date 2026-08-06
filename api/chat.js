@@ -765,6 +765,78 @@ export default async function handler(req, res) {
     }
 
     // ============================================================
+    // OCULUS — INVIO EMAIL (Resend)
+    // ============================================================
+    if (body.action === "send_email") {
+      const key = process.env.RESEND_API_KEY;
+      if (!key) {
+        return res.status(500).json({ error: "RESEND_API_KEY mancante" });
+      }
+      const to = (body.to || "").toString().trim();
+      const subject = (body.subject || "").toString().trim();
+      const html = (body.html || "").toString();
+      const from = (body.from || "CORTEX X Studio <onboarding@resend.dev>").toString();
+      if (!to || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to)) {
+        return res.status(400).json({ error: "email destinatario non valida" });
+      }
+      if (!subject || !html) {
+        return res.status(400).json({ error: "subject o html mancante" });
+      }
+      try {
+        const r = await fetch("https://api.resend.com/emails", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${key}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({ from, to, subject, html })
+        });
+        const d = await r.json();
+        if (!r.ok) {
+          return res.status(r.status).json({ error: d?.message || "Errore Resend", detail: d });
+        }
+        return res.status(200).json({ ok: true, id: d.id, to });
+      } catch (e) {
+        return res.status(500).json({ error: String(e.message || e) });
+      }
+    }
+
+    // ============================================================
+    // OCULUS — TROVA EMAIL DA SITO (fetch + regex, con fallback /contatti)
+    // ============================================================
+    if (body.action === "find_email") {
+      let url = (body.url || "").toString().trim();
+      if (!url) return res.status(400).json({ error: "url mancante" });
+      if (!/^https?:\/\//.test(url)) url = "https://" + url;
+      const rx = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+      const bad = /(example\.|sentry|wixpress|\.png|\.jpg|\.gif|@2x|u003e|domain\.com)/i;
+      const tryFetch = async (u) => {
+        try {
+          const r = await fetch(u, { headers: { "User-Agent": "Mozilla/5.0 CORTEX" } });
+          if (!r.ok) return null;
+          const html = await r.text();
+          const found = (html.match(rx) || []).filter((e) => !bad.test(e));
+          return found.length ? found[0] : null;
+        } catch {
+          return null;
+        }
+      };
+      try {
+        let email = await tryFetch(url);
+        if (!email) {
+          const base = url.replace(/\/+$/, "");
+          for (const p of ["/contatti", "/contact", "/contaters", "/chi-siamo"]) {
+            email = await tryFetch(base + p);
+            if (email) break;
+          }
+        }
+        return res.status(200).json({ ok: true, email: email || null, url });
+      } catch (e) {
+        return res.status(500).json({ error: String(e.message || e) });
+      }
+    }
+
+    // ============================================================
     // OCULUS — REMOTE OK (Remotive)
     // ============================================================
     if (body.action === "remoteok") {
