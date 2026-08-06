@@ -12,6 +12,61 @@ function chunkText(t) {
   return out.length ? out : [{ type: "text", text: { content: "" } }];
 }
 
+// ============================================================
+// SHOPIFY — autenticazione client_credentials (negozi Primavera '26)
+// ============================================================
+const SHOPIFY_API_VERSION = "2026-07";
+let _shopifyTokenCache = { token: null, exp: 0 };
+
+async function getShopifyToken() {
+  if (_shopifyTokenCache.token && Date.now() < _shopifyTokenCache.exp) {
+    return _shopifyTokenCache.token;
+  }
+  const store = process.env.SHOPIFY_STORE;
+  const key = process.env.SHOPIFY_API_KEY;
+  const secret = process.env.SHOPIFY_API_SECRET;
+  if (!store || !key || !secret) {
+    throw new Error("SHOPIFY_STORE / SHOPIFY_API_KEY / SHOPIFY_API_SECRET mancanti");
+  }
+  const r = await fetch(`https://${store}.myshopify.com/admin/oauth/access_token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ client_id: key, client_secret: secret, grant_type: "client_credentials" })
+  });
+  if (!r.ok) {
+    const t = await r.text();
+    throw new Error(`Shopify token error ${r.status}: ${t}`);
+  }
+  const data = await r.json();
+  const token = data.access_token;
+  const ttl = (data.expires_in ? data.expires_in : 86400) * 1000;
+  _shopifyTokenCache = { token, exp: Date.now() + ttl - 5 * 60 * 1000 };
+  return token;
+}
+
+async function shopifyFetch(path, options = {}) {
+  const store = process.env.SHOPIFY_STORE;
+  const token = await getShopifyToken();
+  const url = `https://${store}.myshopify.com/admin/api/${SHOPIFY_API_VERSION}${path}`;
+  const r = await fetch(url, {
+    ...options,
+    headers: {
+      "X-Shopify-Access-Token": token,
+      "Content-Type": "application/json",
+      ...(options.headers || {})
+    }
+  });
+  const text = await r.text();
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    json = text;
+  }
+  if (!r.ok) throw new Error(`Shopify API ${r.status}: ${text}`);
+  return json;
+}
+
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -604,6 +659,105 @@ export default async function handler(req, res) {
           volume: raw.TOTALVOLUME24HTO ?? null,
           supply: raw.SUPPLY ?? null,
           mktcap: raw.MKTCAP ?? null
+        });
+      } catch (e) {
+        return res.status(500).json({ error: String(e.message || e) });
+      }
+    }
+
+    // ============================================================
+    // HELIOS — SHOPIFY: DASHBOARD (negozio + vendite + ordini)
+    // ============================================================
+    if (body.action === "shopify_dashboard") {
+      try {
+        const [shopRes, countRes, ordersRes] = await Promise.all([
+          shopifyFetch("/shop.json"),
+          shopifyFetch("/products/count.json"),
+          shopifyFetch("/orders.json?status=any&limit=50&fields=id,name,total_price,currency,financial_status,created_at,line_items")
+        ]);
+        const shop = shopRes.shop || {};
+        const orders = ordersRes.orders || [];
+        let vendite = 0;
+        for (const o of orders) vendite += parseFloat(o.total_price || 0) || 0;
+        const recenti = orders.slice(0, 8).map((o) => ({
+          nome: o.name,
+          totale: parseFloat(o.total_price || 0) || 0,
+          stato: o.financial_status || "",
+          data: o.created_at
+        }));
+        return res.status(200).json({
+          ok: true,
+          source: "Shopify",
+          negozio: {
+            nome: shop.name || process.env.SHOPIFY_STORE,
+            dominio: shop.domain || null,
+            valuta: shop.currency || "EUR",
+            email: shop.email || null,
+            paese: shop.country_name || null
+          },
+          prodotti: countRes.count || 0,
+          ordini: orders.length,
+          vendite: Math.round(vendite * 100) / 100,
+          recenti
+        });
+      } catch (e) {
+        return res.status(500).json({ error: String(e.message || e) });
+      }
+    }
+
+    // ============================================================
+    // HELIOS — SHOPIFY: LISTA PRODOTTI
+    // ============================================================
+    if (body.action === "shopify_products") {
+      try {
+        const d = await shopifyFetch("/products.json?limit=20");
+        const prodotti = (d.products || []).map((p) => ({
+          id: p.id,
+          titolo: p.title,
+          stato: p.status,
+          prezzo: p.variants && p.variants[0] ? p.variants[0].price : null,
+          immagine: p.image ? p.image.src : null,
+          handle: p.handle
+        }));
+        return res.status(200).json({ ok: true, source: "Shopify", prodotti });
+      } catch (e) {
+        return res.status(500).json({ error: String(e.message || e) });
+      }
+    }
+
+    // ============================================================
+    // HELIOS — SHOPIFY: CREA PRODOTTO
+    // ============================================================
+    if (body.action === "shopify_create") {
+      const p = body.prodotto || {};
+      if (!p.titolo) {
+        return res.status(400).json({ error: "titolo prodotto mancante" });
+      }
+      try {
+        const payload = {
+          product: {
+            title: p.titolo,
+            body_html: p.descrizione || "",
+            vendor: p.brand || "X Studio",
+            product_type: p.categoria || "",
+            tags: p.tags || "",
+            status: p.pubblica ? "active" : "draft",
+            variants: [{ price: p.prezzo != null ? String(p.prezzo) : "0.00" }],
+            images: Array.isArray(p.immagini) ? p.immagini.map((src) => ({ src })) : []
+          }
+        };
+        const d = await shopifyFetch("/products.json", {
+          method: "POST",
+          body: JSON.stringify(payload)
+        });
+        const prod = d.product || {};
+        return res.status(200).json({
+          ok: true,
+          source: "Shopify",
+          id: prod.id,
+          titolo: prod.title,
+          handle: prod.handle,
+          admin_url: `https://${process.env.SHOPIFY_STORE}.myshopify.com/admin/products/${prod.id}`
         });
       } catch (e) {
         return res.status(500).json({ error: String(e.message || e) });
