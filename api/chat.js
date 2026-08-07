@@ -358,6 +358,9 @@ export default async function handler(req, res) {
       }
       const outputsize = Math.min(Math.max(parseInt(body.outputsize) || 60, 20), 200);
 
+      const allowedInt = ["1min", "5min", "15min", "30min", "45min", "1h", "2h", "4h", "1day", "1week"];
+      const interval = allowedInt.includes(String(body.interval)) ? String(body.interval) : "1day";
+
       try {
         // quote (prezzo, variazione, high/low, volume)
         const qUrl =
@@ -365,11 +368,11 @@ export default async function handler(req, res) {
           encodeURIComponent(symbol) +
           "&apikey=" +
           key;
-        // serie giornaliera (candele)
+        // serie candele (intervallo scelto)
         const tsUrl =
           "https://api.twelvedata.com/time_series?symbol=" +
           encodeURIComponent(symbol) +
-          "&interval=1day&outputsize=" +
+          "&interval=" + interval + "&outputsize=" +
           outputsize +
           "&order=ASC&apikey=" +
           key;
