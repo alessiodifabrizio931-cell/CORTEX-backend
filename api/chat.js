@@ -779,6 +779,7 @@ export default async function handler(req, res) {
       const subject = (body.subject || "").toString().trim();
       const html = (body.html || "").toString();
       const from = (body.from || "X Studio <oculus@xstudioportfolio.it>").toString();
+      const replyTo = (body.reply_to || "alessiodifabrizio931@gmail.com").toString();
       if (!to || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to)) {
         return res.status(400).json({ error: "email destinatario non valida" });
       }
@@ -792,7 +793,7 @@ export default async function handler(req, res) {
             Authorization: `Bearer ${key}`,
             "Content-Type": "application/json"
           },
-          body: JSON.stringify({ from, to, subject, html })
+          body: JSON.stringify({ from, to, subject, html, reply_to: replyTo })
         });
         const d = await r.json();
         if (!r.ok) {
