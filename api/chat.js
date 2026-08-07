@@ -362,13 +362,12 @@ export default async function handler(req, res) {
       const interval = allowedInt.includes(String(body.interval)) ? String(body.interval) : "1day";
 
       try {
-        // quote (prezzo, variazione, high/low, volume)
         const qUrl =
           "https://api.twelvedata.com/quote?symbol=" +
           encodeURIComponent(symbol) +
           "&apikey=" +
           key;
-        // serie candele (intervallo scelto)
+
         const tsUrl =
           "https://api.twelvedata.com/time_series?symbol=" +
           encodeURIComponent(symbol) +
@@ -422,7 +421,7 @@ export default async function handler(req, res) {
     }
 
     // ============================================================
-    // NERVUS — CANDELE ALPHA VANTAGE (azioni/forex/indici) — fallback Twelve Data
+    // NERVUS — CANDELE ALPHA VANTAGE
     // ============================================================
     if (body.action === "market_av") {
       const key = process.env.ALPHAVANTAGE_API_KEY;
@@ -450,11 +449,17 @@ export default async function handler(req, res) {
             encodeURIComponent(to) +
             "&outputsize=compact&apikey=" +
             key;
+
           const d = await fetch(url).then((r) => r.json());
+
           if (d.Note || d.Information) {
-            return res.status(429).json({ error: "Limite Alpha Vantage raggiunto, riprova più tardi." });
+            return res.status(429).json({
+              error: "Limite Alpha Vantage raggiunto, riprova più tardi."
+            });
           }
+
           const ts = d["Time Series FX (Daily)"] || {};
+
           candles = Object.keys(ts)
             .sort()
             .map((time) => ({
@@ -465,12 +470,16 @@ export default async function handler(req, res) {
               close: Number(ts[time]["4. close"]),
               volume: null
             }));
+
           if (candles.length) {
             const last = candles[candles.length - 1];
             const prev = candles[candles.length - 2] || last;
+
             quote = {
               price: last.close,
-              changePct: prev.close ? ((last.close - prev.close) / prev.close) * 100 : null,
+              changePct: prev.close
+                ? ((last.close - prev.close) / prev.close) * 100
+                : null,
               high: last.high,
               low: last.low,
               volume: null,
@@ -483,19 +492,26 @@ export default async function handler(req, res) {
             encodeURIComponent(symbol) +
             "&outputsize=compact&apikey=" +
             key;
+
           const qUrl =
             "https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=" +
             encodeURIComponent(symbol) +
             "&apikey=" +
             key;
+
           const [tsRes, qRes] = await Promise.all([
             fetch(tsUrl).then((r) => r.json()),
             fetch(qUrl).then((r) => r.json())
           ]);
+
           if (tsRes.Note || tsRes.Information) {
-            return res.status(429).json({ error: "Limite Alpha Vantage raggiunto, riprova più tardi." });
+            return res.status(429).json({
+              error: "Limite Alpha Vantage raggiunto, riprova più tardi."
+            });
           }
+
           const ts = tsRes["Time Series (Daily)"] || {};
+
           candles = Object.keys(ts)
             .sort()
             .map((time) => ({
@@ -504,24 +520,52 @@ export default async function handler(req, res) {
               high: Number(ts[time]["2. high"]),
               low: Number(ts[time]["3. low"]),
               close: Number(ts[time]["4. close"]),
-              volume: ts[time]["5. volume"] != null ? Number(ts[time]["5. volume"]) : null
+              volume:
+                ts[time]["5. volume"] != null
+                  ? Number(ts[time]["5. volume"])
+                  : null
             }));
+
           const gq = qRes["Global Quote"] || {};
-          const gqPrice = gq["05. price"] != null ? Number(gq["05. price"]) : null;
+
+          const gqPrice =
+            gq["05. price"] != null
+              ? Number(gq["05. price"])
+              : null;
+
           const gqChange =
-            gq["10. change percent"] != null ? parseFloat(gq["10. change percent"]) : null;
+            gq["10. change percent"] != null
+              ? parseFloat(gq["10. change percent"])
+              : null;
+
           quote = {
-            price: gqPrice != null ? gqPrice : candles.length ? candles[candles.length - 1].close : null,
+            price:
+              gqPrice != null
+                ? gqPrice
+                : candles.length
+                ? candles[candles.length - 1].close
+                : null,
             changePct: gqChange,
-            high: gq["03. high"] != null ? Number(gq["03. high"]) : null,
-            low: gq["04. low"] != null ? Number(gq["04. low"]) : null,
-            volume: gq["06. volume"] != null ? Number(gq["06. volume"]) : null,
+            high:
+              gq["03. high"] != null
+                ? Number(gq["03. high"])
+                : null,
+            low:
+              gq["04. low"] != null
+                ? Number(gq["04. low"])
+                : null,
+            volume:
+              gq["06. volume"] != null
+                ? Number(gq["06. volume"])
+                : null,
             name: symbol
           };
         }
 
         if (!candles.length) {
-          return res.status(400).json({ error: "Nessun dato Alpha Vantage per " + symbol });
+          return res.status(400).json({
+            error: "Nessun dato Alpha Vantage per " + symbol
+          });
         }
 
         return res.status(200).json({
@@ -532,7 +576,9 @@ export default async function handler(req, res) {
           candles
         });
       } catch (e) {
-        return res.status(500).json({ error: String(e.message || e) });
+        return res.status(500).json({
+          error: String(e.message || e)
+        });
       }
     }
 
@@ -544,11 +590,18 @@ export default async function handler(req, res) {
       if (!key) {
         return res.status(500).json({ error: "TAVILY_API_KEY mancante" });
       }
+
       const query = (body.query || "").toString().trim();
+
       if (!query) {
         return res.status(400).json({ error: "query mancante" });
       }
-      const max = Math.min(Math.max(parseInt(body.max_results) || 6, 1), 10);
+
+      const max = Math.min(
+        Math.max(parseInt(body.max_results) || 6, 1),
+        10
+      );
+
       try {
         const r = await fetch("https://api.tavily.com/search", {
           method: "POST",
@@ -561,16 +614,22 @@ export default async function handler(req, res) {
             include_answer: true
           })
         });
+
         const d = await r.json();
+
         if (!r.ok) {
-          return res.status(r.status).json({ error: d?.error || "Errore Tavily" });
+          return res.status(r.status).json({
+            error: d?.error || "Errore Tavily"
+          });
         }
+
         const results = (d.results || []).map((x) => ({
           title: x.title || "",
           url: x.url || "",
           content: (x.content || "").toString().slice(0, 500),
           score: x.score || null
         }));
+
         return res.status(200).json({
           ok: true,
           source: "Tavily",
@@ -579,7 +638,9 @@ export default async function handler(req, res) {
           results
         });
       } catch (e) {
-        return res.status(500).json({ error: String(e.message || e) });
+        return res.status(500).json({
+          error: String(e.message || e)
+        });
       }
     }
 
@@ -588,29 +649,50 @@ export default async function handler(req, res) {
     // ============================================================
     if (body.action === "scrape") {
       const key = process.env.FIRECRAWL_API_KEY;
+
       if (!key) {
-        return res.status(500).json({ error: "FIRECRAWL_API_KEY mancante" });
-      }
-      const url = (body.url || "").toString().trim();
-      if (!url || !/^https?:\/\//.test(url)) {
-        return res.status(400).json({ error: "url mancante o non valido (deve iniziare con http/https)" });
-      }
-      try {
-        const r = await fetch("https://api.firecrawl.dev/v1/scrape", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${key}`
-          },
-          body: JSON.stringify({ url, formats: ["markdown"], onlyMainContent: true })
+        return res.status(500).json({
+          error: "FIRECRAWL_API_KEY mancante"
         });
+      }
+
+      const url = (body.url || "").toString().trim();
+
+      if (!url || !/^https?:\/\//.test(url)) {
+        return res.status(400).json({
+          error: "url mancante o non valido (deve iniziare con http/https)"
+        });
+      }
+
+      try {
+        const r = await fetch(
+          "https://api.firecrawl.dev/v1/scrape",
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${key}`
+            },
+            body: JSON.stringify({
+              url,
+              formats: ["markdown"],
+              onlyMainContent: true
+            })
+          }
+        );
+
         const d = await r.json();
+
         if (!r.ok || d.success === false) {
-          return res.status(r.status || 502).json({ error: d?.error || "Errore Firecrawl" });
+          return res.status(r.status || 502).json({
+            error: d?.error || "Errore Firecrawl"
+          });
         }
+
         const data = d.data || {};
         const md = (data.markdown || "").toString();
         const meta = data.metadata || {};
+
         return res.status(200).json({
           ok: true,
           source: "Firecrawl",
@@ -621,36 +703,64 @@ export default async function handler(req, res) {
           truncated: md.length > 12000
         });
       } catch (e) {
-        return res.status(500).json({ error: String(e.message || e) });
+        return res.status(500).json({
+          error: String(e.message || e)
+        });
       }
     }
 
     // ============================================================
-    // COINDESK DATA — PREZZO/INDICE BTC (NERVUS) — richiede chiave attiva
+    // COINDESK DATA — PREZZO/INDICE BTC (NERVUS)
     // ============================================================
     if (body.action === "coindesk") {
       const key = process.env.COINDESK_API_KEY;
+
       if (!key) {
-        return res.status(500).json({ error: "COINDESK_API_KEY mancante" });
+        return res.status(500).json({
+          error: "COINDESK_API_KEY mancante"
+        });
       }
-      const fsym = (body.symbol || "BTC").toString().trim().toUpperCase().replace(/USDT?$/, "");
-      const tsym = (body.vs || "USD").toString().trim().toUpperCase();
+
+      const fsym = (body.symbol || "BTC")
+        .toString()
+        .trim()
+        .toUpperCase()
+        .replace(/USDT?$/, "");
+
+      const tsym = (body.vs || "USD")
+        .toString()
+        .trim()
+        .toUpperCase();
+
       try {
         const r = await fetch(
           "https://min-api.cryptocompare.com/data/pricemultifull?fsyms=" +
             encodeURIComponent(fsym) +
             "&tsyms=" +
             encodeURIComponent(tsym),
-          { headers: { authorization: "Apikey " + key } }
+          {
+            headers: {
+              authorization: "Apikey " + key
+            }
+          }
         );
+
         const d = await r.json();
+
         if (d.Response === "Error") {
-          return res.status(400).json({ error: d.Message || "Errore CoinDesk Data" });
+          return res.status(400).json({
+            error: d.Message || "Errore CoinDesk Data"
+          });
         }
+
         const raw = d?.RAW?.[fsym]?.[tsym];
+
         if (!raw) {
-          return res.status(404).json({ error: "Nessun dato CoinDesk per " + fsym + "/" + tsym });
+          return res.status(404).json({
+            error: "Nessun dato CoinDesk per " + fsym + "/" + tsym
+          });
         }
+
         return res.status(200).json({
           ok: true,
           source: "CoinDesk Data",
@@ -664,47 +774,85 @@ export default async function handler(req, res) {
           mktcap: raw.MKTCAP ?? null
         });
       } catch (e) {
-        return res.status(500).json({ error: String(e.message || e) });
+        return res.status(500).json({
+          error: String(e.message || e)
+        });
       }
     }
 
     // ============================================================
-    // HELIOS — SHOPIFY: DASHBOARD (negozio + vendite + ordini)
+    // HELIOS — SHOPIFY: DASHBOARD
     // ============================================================
     if (body.action === "shopify_dashboard") {
       try {
-        const [shopRes, countRes, ordersRes] = await Promise.all([
-          shopifyFetch("/shop.json"),
-          shopifyFetch("/products/count.json"),
-          shopifyFetch("/orders.json?status=any&limit=50&fields=id,name,total_price,currency,financial_status,created_at,line_items")
-        ]);
+        const [shopRes, countRes, ordersRes] =
+          await Promise.all([
+            shopifyFetch("/shop.json"),
+            shopifyFetch("/products/count.json"),
+            shopifyFetch(
+              "/orders.json?status=any&limit=50&fields=id,name,total_price,currency,financial_status,created_at,line_items"
+            )
+          ]);
+
         const shop = shopRes.shop || {};
         const orders = ordersRes.orders || [];
+
         let vendite = 0;
-        for (const o of orders) vendite += parseFloat(o.total_price || 0) || 0;
-        const recenti = orders.slice(0, 8).map((o) => ({
-          nome: o.name,
-          totale: parseFloat(o.total_price || 0) || 0,
-          stato: o.financial_status || "",
-          data: o.created_at
-        }));
+
+        for (const o of orders) {
+          vendite +=
+            parseFloat(o.total_price || 0) || 0;
+        }
+
+        const recenti = orders
+          .slice(0, 8)
+          .map((o) => ({
+            nome: o.name,
+            totale:
+              parseFloat(o.total_price || 0) || 0,
+            stato:
+              o.financial_status || "",
+            data:
+              o.created_at
+          }));
+
         return res.status(200).json({
           ok: true,
           source: "Shopify",
+
           negozio: {
-            nome: shop.name || process.env.SHOPIFY_STORE,
-            dominio: shop.domain || null,
-            valuta: shop.currency || "EUR",
-            email: shop.email || null,
-            paese: shop.country_name || null
+            nome:
+              shop.name ||
+              process.env.SHOPIFY_STORE,
+
+            dominio:
+              shop.domain || null,
+
+            valuta:
+              shop.currency || "EUR",
+
+            email:
+              shop.email || null,
+
+            paese:
+              shop.country_name || null
           },
-          prodotti: countRes.count || 0,
-          ordini: orders.length,
-          vendite: Math.round(vendite * 100) / 100,
+
+          prodotti:
+            countRes.count || 0,
+
+          ordini:
+            orders.length,
+
+          vendite:
+            Math.round(vendite * 100) / 100,
+
           recenti
         });
       } catch (e) {
-        return res.status(500).json({ error: String(e.message || e) });
+        return res.status(500).json({
+          error: String(e.message || e)
+        });
       }
     }
 
@@ -713,18 +861,41 @@ export default async function handler(req, res) {
     // ============================================================
     if (body.action === "shopify_products") {
       try {
-        const d = await shopifyFetch("/products.json?limit=20");
-        const prodotti = (d.products || []).map((p) => ({
-          id: p.id,
-          titolo: p.title,
-          stato: p.status,
-          prezzo: p.variants && p.variants[0] ? p.variants[0].price : null,
-          immagine: p.image ? p.image.src : null,
-          handle: p.handle
-        }));
-        return res.status(200).json({ ok: true, source: "Shopify", prodotti });
+        const d =
+          await shopifyFetch(
+            "/products.json?limit=20"
+          );
+
+        const prodotti =
+          (d.products || []).map((p) => ({
+            id: p.id,
+            titolo: p.title,
+            stato: p.status,
+
+            prezzo:
+              p.variants &&
+              p.variants[0]
+                ? p.variants[0].price
+                : null,
+
+            immagine:
+              p.image
+                ? p.image.src
+                : null,
+
+            handle:
+              p.handle
+          }));
+
+        return res.status(200).json({
+          ok: true,
+          source: "Shopify",
+          prodotti
+        });
       } catch (e) {
-        return res.status(500).json({ error: String(e.message || e) });
+        return res.status(500).json({
+          error: String(e.message || e)
+        });
       }
     }
 
@@ -733,37 +904,72 @@ export default async function handler(req, res) {
     // ============================================================
     if (body.action === "shopify_create") {
       const p = body.prodotto || {};
+
       if (!p.titolo) {
-        return res.status(400).json({ error: "titolo prodotto mancante" });
+        return res.status(400).json({
+          error: "titolo prodotto mancante"
+        });
       }
+
       try {
         const payload = {
           product: {
             title: p.titolo,
-            body_html: p.descrizione || "",
-            vendor: p.brand || "CORTEX",
-            product_type: p.categoria || "",
-            tags: p.tags || "",
-            status: p.pubblica ? "active" : "draft",
-            variants: [{ price: p.prezzo != null ? String(p.prezzo) : "0.00" }],
-            images: Array.isArray(p.immagini) ? p.immagini.map((src) => ({ src })) : []
+            body_html:
+              p.descrizione || "",
+            vendor:
+              p.brand || "CORTEX",
+            product_type:
+              p.categoria || "",
+            tags:
+              p.tags || "",
+            status:
+              p.pubblica
+                ? "active"
+                : "draft",
+            variants: [
+              {
+                price:
+                  p.prezzo != null
+                    ? String(p.prezzo)
+                    : "0.00"
+              }
+            ],
+            images:
+              Array.isArray(p.immagini)
+                ? p.immagini.map(
+                    (src) => ({ src })
+                  )
+                : []
           }
         };
-        const d = await shopifyFetch("/products.json", {
-          method: "POST",
-          body: JSON.stringify(payload)
-        });
-        const prod = d.product || {};
+
+        const d =
+          await shopifyFetch(
+            "/products.json",
+            {
+              method: "POST",
+              body:
+                JSON.stringify(payload)
+            }
+          );
+
+        const prod =
+          d.product || {};
+
         return res.status(200).json({
           ok: true,
           source: "Shopify",
           id: prod.id,
           titolo: prod.title,
           handle: prod.handle,
-          admin_url: `https://${process.env.SHOPIFY_STORE}.myshopify.com/admin/products/${prod.id}`
+          admin_url:
+            `https://${process.env.SHOPIFY_STORE}.myshopify.com/admin/products/${prod.id}`
         });
       } catch (e) {
-        return res.status(500).json({ error: String(e.message || e) });
+        return res.status(500).json({
+          error: String(e.message || e)
+        });
       }
     }
 
@@ -771,77 +977,210 @@ export default async function handler(req, res) {
     // OCULUS — INVIO EMAIL (Resend)
     // ============================================================
     if (body.action === "send_email") {
-      const key = process.env.RESEND_API_KEY;
+      const key =
+        process.env.RESEND_API_KEY;
+
       if (!key) {
-        return res.status(500).json({ error: "RESEND_API_KEY mancante" });
-      }
-      const to = (body.to || "").toString().trim();
-      const subject = (body.subject || "").toString().trim();
-      const html = (body.html || "").toString();
-      const from = (body.from || "CORTEX <oculus@xstudioportfolio.it>").toString();
-      const replyTo = (body.reply_to || "alessiodifabrizio931@gmail.com").toString();
-      if (!to || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to)) {
-        return res.status(400).json({ error: "email destinatario non valida" });
-      }
-      if (!subject || !html) {
-        return res.status(400).json({ error: "subject o html mancante" });
-      }
-      try {
-        const r = await fetch("https://api.resend.com/emails", {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${key}`,
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({ from, to, subject, html, reply_to: replyTo })
+        return res.status(500).json({
+          error: "RESEND_API_KEY mancante"
         });
-        const d = await r.json();
+      }
+
+      const to =
+        (body.to || "")
+          .toString()
+          .trim();
+
+      const subject =
+        (body.subject || "")
+          .toString()
+          .trim();
+
+      const html =
+        (body.html || "")
+          .toString();
+
+      const from =
+        (
+          body.from ||
+          "CORTEX <oculus@xstudioportfolio.it>"
+        ).toString();
+
+      const replyTo =
+        (
+          body.reply_to ||
+          "alessiodifabrizio931@gmail.com"
+        ).toString();
+
+      if (
+        !to ||
+        !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to)
+      ) {
+        return res.status(400).json({
+          error:
+            "email destinatario non valida"
+        });
+      }
+
+      if (!subject || !html) {
+        return res.status(400).json({
+          error:
+            "subject o html mancante"
+        });
+      }
+
+      try {
+        const r =
+          await fetch(
+            "https://api.resend.com/emails",
+            {
+              method: "POST",
+
+              headers: {
+                Authorization:
+                  `Bearer ${key}`,
+
+                "Content-Type":
+                  "application/json"
+              },
+
+              body:
+                JSON.stringify({
+                  from,
+                  to,
+                  subject,
+                  html,
+                  reply_to: replyTo
+                })
+            }
+          );
+
+        const d =
+          await r.json();
+
         if (!r.ok) {
-          return res.status(r.status).json({ error: d?.message || "Errore Resend", detail: d });
+          return res.status(r.status).json({
+            error:
+              d?.message ||
+              "Errore Resend",
+
+            detail:
+              d
+          });
         }
-        return res.status(200).json({ ok: true, id: d.id, to });
+
+        return res.status(200).json({
+          ok: true,
+          id: d.id,
+          to
+        });
       } catch (e) {
-        return res.status(500).json({ error: String(e.message || e) });
+        return res.status(500).json({
+          error: String(e.message || e)
+        });
       }
     }
 
     // ============================================================
-    // OCULUS — TROVA EMAIL DA SITO (fetch + regex, con fallback /contatti)
+    // OCULUS — TROVA EMAIL DA SITO
     // ============================================================
     if (body.action === "find_email") {
-      let url = (body.url || "").toString().trim();
-      if (!url) return res.status(400).json({ error: "url mancante" });
-      if (!/^https?:\/\//.test(url)) url = "https://" + url;
-      const rx = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
-      const bad = /(example\.|sentry|wixpress|\.png|\.jpg|\.gif|@2x|u003e|domain\.com)/i;
-      const tryFetch = async (u) => {
-        try {
-          const r = await fetch(u, { headers: { "User-Agent": "Mozilla/5.0 CORTEX" } });
-          if (!r.ok) return null;
-          const html = await r.text();
-          const found = (html.match(rx) || []).filter((e) => !bad.test(e));
-          return found.length ? found[0] : null;
-        } catch {
-          return null;
-        }
-      };
+      let url =
+        (body.url || "")
+          .toString()
+          .trim();
+
+      if (!url) {
+        return res.status(400).json({
+          error: "url mancante"
+        });
+      }
+
+      if (!/^https?:\/\//.test(url)) {
+        url = "https://" + url;
+      }
+
+      const rx =
+        /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+
+      const bad =
+        /(example\.|sentry|wixpress|\.png|\.jpg|\.gif|@2x|u003e|domain\.com)/i;
+
+      const tryFetch =
+        async (u) => {
+          try {
+            const r =
+              await fetch(u, {
+                headers: {
+                  "User-Agent":
+                    "Mozilla/5.0 CORTEX"
+                }
+              });
+
+            if (!r.ok) {
+              return null;
+            }
+
+            const html =
+              await r.text();
+
+            const found =
+              (html.match(rx) || [])
+                .filter(
+                  (e) =>
+                    !bad.test(e)
+                );
+
+            return found.length
+              ? found[0]
+              : null;
+          } catch {
+            return null;
+          }
+        };
+
       try {
-        let email = await tryFetch(url);
+        let email =
+          await tryFetch(url);
+
         if (!email) {
-          const base = url.replace(/\/+$/, "");
-          for (const p of ["/contatti", "/contact", "/contaters", "/chi-siamo"]) {
-            email = await tryFetch(base + p);
-            if (email) break;
+          const base =
+            url.replace(/\/+$/, "");
+
+          for (
+            const p of [
+              "/contatti",
+              "/contact",
+              "/contaters",
+              "/chi-siamo"
+            ]
+          ) {
+            email =
+              await tryFetch(
+                base + p
+              );
+
+            if (email) {
+              break;
+            }
           }
         }
-        return res.status(200).json({ ok: true, email: email || null, url });
+
+        return res.status(200).json({
+          ok: true,
+          email:
+            email || null,
+          url
+        });
       } catch (e) {
-        return res.status(500).json({ error: String(e.message || e) });
+        return res.status(500).json({
+          error: String(e.message || e)
+        });
       }
     }
 
     // ============================================================
-    // OCULUS — REMOTE OK (Remotive)
+    // OCULUS — REMOTE OK
     // ============================================================
     if (body.action === "remoteok") {
       return searchRemotive(body, res);
@@ -851,34 +1190,67 @@ export default async function handler(req, res) {
     // NOTION — FUNZIONI COMUNI
     // ============================================================
     const notionH = () => ({
-      Authorization: `Bearer ${process.env.NOTION_TOKEN}`,
-      "Notion-Version": "2022-06-28",
-      "Content-Type": "application/json"
+      Authorization:
+        `Bearer ${process.env.NOTION_TOKEN}`,
+      "Notion-Version":
+        "2022-06-28",
+      "Content-Type":
+        "application/json"
     });
 
     const readProp = (p) => {
       if (!p) return null;
+
       switch (p.type) {
         case "title":
-          return (p.title || []).map((t) => t.plain_text).join("");
+          return (p.title || [])
+            .map(
+              (t) =>
+                t.plain_text
+            )
+            .join("");
+
         case "rich_text":
-          return (p.rich_text || []).map((t) => t.plain_text).join("");
+          return (p.rich_text || [])
+            .map(
+              (t) =>
+                t.plain_text
+            )
+            .join("");
+
         case "number":
           return p.number;
+
         case "select":
-          return p.select ? p.select.name : null;
+          return p.select
+            ? p.select.name
+            : null;
+
         case "multi_select":
-          return (p.multi_select || []).map((s) => s.name).join(", ");
+          return (p.multi_select || [])
+            .map(
+              (s) =>
+                s.name
+            )
+            .join(", ");
+
         case "date":
-          return p.date ? p.date.start : null;
+          return p.date
+            ? p.date.start
+            : null;
+
         case "email":
           return p.email || null;
+
         case "phone_number":
           return p.phone_number || null;
+
         case "checkbox":
           return p.checkbox;
+
         case "url":
           return p.url || null;
+
         default:
           return null;
       }
@@ -889,64 +1261,146 @@ export default async function handler(req, res) {
         .toString()
         .toLowerCase()
         .normalize("NFD")
-        .replace(/[\u0300-\u036f]/g, "")
+        .replace(
+          /[\u0300-\u036f]/g,
+          ""
+        )
         .trim();
 
-    const findProp = (schemaProps, aliases) => {
-      const keys = Object.keys(schemaProps || {});
-      for (const a of aliases) {
-        const t = norm(a);
-        const k = keys.find((k) => norm(k) === t);
-        if (k) return k;
-      }
-      return null;
-    };
+    const findProp =
+      (schemaProps, aliases) => {
+        const keys =
+          Object.keys(
+            schemaProps || {}
+          );
 
-    const notionQuery = async (dbId) => {
-      const r = await fetch(`https://api.notion.com/v1/databases/${dbId}/query`, {
-        method: "POST",
-        headers: notionH(),
-        body: JSON.stringify({ page_size: 100 })
-      });
-      const d = await r.json();
-      if (!r.ok) throw new Error(d?.message || "Errore query Notion");
-      return d.results || [];
-    };
+        for (
+          const a of aliases
+        ) {
+          const t =
+            norm(a);
 
-    const notionSchema = async (dbId) => {
-      const r = await fetch(`https://api.notion.com/v1/databases/${dbId}`, {
-        headers: notionH()
-      });
-      const d = await r.json();
-      if (!r.ok) throw new Error(d?.message || "Errore schema Notion");
-      return d.properties || {};
-    };
+          const k =
+            keys.find(
+              (k) =>
+                norm(k) === t
+            );
+
+          if (k) {
+            return k;
+          }
+        }
+
+        return null;
+      };
+
+    const notionQuery =
+      async (dbId) => {
+        const r =
+          await fetch(
+            `https://api.notion.com/v1/databases/${dbId}/query`,
+            {
+              method: "POST",
+              headers: notionH(),
+              body:
+                JSON.stringify({
+                  page_size: 100
+                })
+            }
+          );
+
+        const d =
+          await r.json();
+
+        if (!r.ok) {
+          throw new Error(
+            d?.message ||
+              "Errore query Notion"
+          );
+        }
+
+        return d.results || [];
+      };
+
+    const notionSchema =
+      async (dbId) => {
+        const r =
+          await fetch(
+            `https://api.notion.com/v1/databases/${dbId}`,
+            {
+              headers:
+                notionH()
+            }
+          );
+
+        const d =
+          await r.json();
+
+        if (!r.ok) {
+          throw new Error(
+            d?.message ||
+              "Errore schema Notion"
+          );
+        }
+
+        return d.properties || {};
+      };
 
     // ============================================================
     // ATLAS — LEGGI CLIENTI
     // ============================================================
     if (body.action === "atlas_read") {
       if (!process.env.NOTION_TOKEN) {
-        return res.status(500).json({ error: "NOTION_TOKEN mancante" });
-      }
-      const dbId = (body.databaseId || "").toString().replace(/-/g, "").trim();
-      if (!dbId) {
-        return res.status(400).json({ error: "databaseId mancante" });
-      }
-      try {
-        const rows = await notionQuery(dbId);
-        const clienti = rows.map((pg) => {
-          const pr = pg.properties || {};
-          const out = {};
-          for (const [k, v] of Object.entries(pr)) {
-            out[k] = readProp(v);
-          }
-          out._id = pg.id;
-          return out;
+        return res.status(500).json({
+          error: "NOTION_TOKEN mancante"
         });
-        return res.status(200).json({ ok: true, clienti });
+      }
+
+      const dbId =
+        (body.databaseId || "")
+          .toString()
+          .replace(/-/g, "")
+          .trim();
+
+      if (!dbId) {
+        return res.status(400).json({
+          error: "databaseId mancante"
+        });
+      }
+
+      try {
+        const rows =
+          await notionQuery(dbId);
+
+        const clienti =
+          rows.map((pg) => {
+            const pr =
+              pg.properties || {};
+
+            const out = {};
+
+            for (
+              const [k, v] of
+              Object.entries(pr)
+            ) {
+              out[k] =
+                readProp(v);
+            }
+
+            out._id =
+              pg.id;
+
+            return out;
+          });
+
+        return res.status(200).json({
+          ok: true,
+          clienti
+        });
       } catch (e) {
-        return res.status(500).json({ error: String(e.message || e) });
+        return res.status(500).json({
+          error: String(e.message || e)
+        });
       }
     }
 
@@ -955,99 +1409,303 @@ export default async function handler(req, res) {
     // ============================================================
     if (body.action === "atlas_write") {
       if (!process.env.NOTION_TOKEN) {
-        return res.status(500).json({ error: "NOTION_TOKEN mancante" });
+        return res.status(500).json({
+          error: "NOTION_TOKEN mancante"
+        });
       }
-      const dbId = (body.databaseId || "").toString().replace(/-/g, "").trim();
+
+      const dbId =
+        (body.databaseId || "")
+          .toString()
+          .replace(/-/g, "")
+          .trim();
+
       if (!dbId) {
-        return res.status(400).json({ error: "databaseId mancante" });
+        return res.status(400).json({
+          error: "databaseId mancante"
+        });
       }
-      const dati = body.dati || {};
+
+      const dati =
+        body.dati || {};
+
       try {
-        const schema = await notionSchema(dbId);
+        const schema =
+          await notionSchema(dbId);
+
         const props = {};
+
         const map = [
-          { al: ["Nome", "Name"], v: dati.nome },
-          { al: ["Stato"], v: dati.stato },
-          { al: ["Telefono"], v: dati.telefono },
-          { al: ["Email"], v: dati.email },
-          { al: ["Servizio"], v: dati.servizio },
-          { al: ["Citta", "Città"], v: dati.citta },
-          { al: ["Tipo rinnovo"], v: dati.tipoRinnovo },
-          { al: ["Data rinnovo"], v: dati.dataRinnovo },
-          { al: ["Ultimo contatto"], v: dati.ultimoContatto },
-          { al: ["Prossima azione"], v: dati.prossimaAzione },
-          { al: ["Note"], v: dati.note }
+          {
+            al: ["Nome", "Name"],
+            v: dati.nome
+          },
+          {
+            al: ["Stato"],
+            v: dati.stato
+          },
+          {
+            al: ["Telefono"],
+            v: dati.telefono
+          },
+          {
+            al: ["Email"],
+            v: dati.email
+          },
+          {
+            al: ["Servizio"],
+            v: dati.servizio
+          },
+          {
+            al: ["Citta", "Città"],
+            v: dati.citta
+          },
+          {
+            al: ["Tipo rinnovo"],
+            v: dati.tipoRinnovo
+          },
+          {
+            al: ["Data rinnovo"],
+            v: dati.dataRinnovo
+          },
+          {
+            al: ["Ultimo contatto"],
+            v: dati.ultimoContatto
+          },
+          {
+            al: ["Prossima azione"],
+            v: dati.prossimaAzione
+          },
+          {
+            al: ["Note"],
+            v: dati.note
+          }
         ];
 
-        for (const m of map) {
-          if (m.v == null || m.v === "") continue;
-          const key = findProp(schema, m.al);
-          if (!key) continue;
-          const realType = schema[key].type;
+        for (
+          const m of map
+        ) {
+          if (
+            m.v == null ||
+            m.v === ""
+          ) {
+            continue;
+          }
 
-          if (realType === "title") {
-            props[key] = { title: [{ text: { content: String(m.v).slice(0, 200) } }] };
-          } else if (realType === "rich_text") {
-            props[key] = { rich_text: [{ text: { content: String(m.v).slice(0, 1800) } }] };
-          } else if (realType === "select") {
-            props[key] = { select: { name: String(m.v).slice(0, 100) } };
-          } else if (realType === "email") {
-            props[key] = { email: String(m.v) };
-          } else if (realType === "phone_number") {
-            props[key] = { phone_number: String(m.v) };
-          } else if (realType === "date") {
-            props[key] = { date: { start: String(m.v) } };
-          } else if (realType === "number") {
-            props[key] = { number: Number(m.v) };
+          const key =
+            findProp(
+              schema,
+              m.al
+            );
+
+          if (!key) {
+            continue;
+          }
+
+          const realType =
+            schema[key].type;
+
+          if (
+            realType === "title"
+          ) {
+            props[key] = {
+              title: [
+                {
+                  text: {
+                    content:
+                      String(m.v)
+                        .slice(
+                          0,
+                          200
+                        )
+                  }
+                }
+              ]
+            };
+          } else if (
+            realType ===
+            "rich_text"
+          ) {
+            props[key] = {
+              rich_text: [
+                {
+                  text: {
+                    content:
+                      String(m.v)
+                        .slice(
+                          0,
+                          1800
+                        )
+                  }
+                }
+              ]
+            };
+          } else if (
+            realType === "select"
+          ) {
+            props[key] = {
+              select: {
+                name:
+                  String(m.v)
+                    .slice(
+                      0,
+                      100
+                    )
+              }
+            };
+          } else if (
+            realType === "email"
+          ) {
+            props[key] = {
+              email:
+                String(m.v)
+            };
+          } else if (
+            realType ===
+            "phone_number"
+          ) {
+            props[key] = {
+              phone_number:
+                String(m.v)
+            };
+          } else if (
+            realType === "date"
+          ) {
+            props[key] = {
+              date: {
+                start:
+                  String(m.v)
+              }
+            };
+          } else if (
+            realType === "number"
+          ) {
+            props[key] = {
+              number:
+                Number(m.v)
+            };
           }
         }
 
-        const r = await fetch("https://api.notion.com/v1/pages", {
-          method: "POST",
-          headers: notionH(),
-          body: JSON.stringify({ parent: { database_id: dbId }, properties: props })
-        });
-        const d = await r.json();
+        const r =
+          await fetch(
+            "https://api.notion.com/v1/pages",
+            {
+              method: "POST",
+              headers:
+                notionH(),
+
+              body:
+                JSON.stringify({
+                  parent: {
+                    database_id:
+                      dbId
+                  },
+                  properties:
+                    props
+                })
+            }
+          );
+
+        const d =
+          await r.json();
+
         if (!r.ok) {
-          return res.status(r.status).json({ error: d?.message || "Errore creazione cliente" });
+          return res.status(r.status).json({
+            error:
+              d?.message ||
+              "Errore creazione cliente"
+          });
         }
-        return res.status(200).json({ ok: true, url: d.url || null });
+
+        return res.status(200).json({
+          ok: true,
+          url: d.url || null
+        });
       } catch (e) {
-        return res.status(500).json({ error: String(e.message || e) });
+        return res.status(500).json({
+          error: String(e.message || e)
+        });
       }
     }
 
     // ============================================================
-    // MIDAS / NOTION — SVUOTA DATABASE (archivia tutte le righe)
+    // MIDAS / NOTION — SVUOTA DATABASE
     // ============================================================
-    if (body.action === "midas_clear" || body.action === "notion_clear") {
+    if (
+      body.action === "midas_clear" ||
+      body.action === "notion_clear"
+    ) {
       if (!process.env.NOTION_TOKEN) {
-        return res.status(500).json({ error: "NOTION_TOKEN mancante" });
+        return res.status(500).json({
+          error: "NOTION_TOKEN mancante"
+        });
       }
-      const dbId = (body.databaseId || "").toString().replace(/-/g, "").trim();
+
+      const dbId =
+        (body.databaseId || "")
+          .toString()
+          .replace(/-/g, "")
+          .trim();
+
       if (!dbId) {
-        return res.status(400).json({ error: "databaseId mancante" });
+        return res.status(400).json({
+          error: "databaseId mancante"
+        });
       }
+
       try {
         let archiviate = 0;
         let totali = 0;
-        // ripeti finché il database ha righe (max 10 giri da 100)
-        for (let giro = 0; giro < 10; giro++) {
-          const rows = await notionQuery(dbId);
-          if (!rows.length) break;
-          totali += rows.length;
-          for (const pg of rows) {
-            const r = await fetch("https://api.notion.com/v1/pages/" + pg.id, {
-              method: "PATCH",
-              headers: notionH(),
-              body: JSON.stringify({ archived: true })
-            });
-            if (r.ok) archiviate++;
+
+        for (
+          let giro = 0;
+          giro < 10;
+          giro++
+        ) {
+          const rows =
+            await notionQuery(dbId);
+
+          if (!rows.length) {
+            break;
+          }
+
+          totali +=
+            rows.length;
+
+          for (
+            const pg of rows
+          ) {
+            const r =
+              await fetch(
+                "https://api.notion.com/v1/pages/" +
+                  pg.id,
+                {
+                  method: "PATCH",
+                  headers:
+                    notionH(),
+                  body:
+                    JSON.stringify({
+                      archived: true
+                    })
+                }
+              );
+
+            if (r.ok) {
+              archiviate++;
+            }
           }
         }
-        return res.status(200).json({ ok: true, archiviate, totali });
+
+        return res.status(200).json({
+          ok: true,
+          archiviate,
+          totali
+        });
       } catch (e) {
-        return res.status(500).json({ error: String(e.message || e) });
+        return res.status(500).json({
+          error: String(e.message || e)
+        });
       }
     }
 
@@ -1056,25 +1714,56 @@ export default async function handler(req, res) {
     // ============================================================
     if (body.action === "atlas_delete") {
       if (!process.env.NOTION_TOKEN) {
-        return res.status(500).json({ error: "NOTION_TOKEN mancante" });
-      }
-      const pageId = (body.pageId || "").toString().trim();
-      if (!pageId) {
-        return res.status(400).json({ error: "pageId mancante" });
-      }
-      try {
-        const r = await fetch("https://api.notion.com/v1/pages/" + pageId, {
-          method: "PATCH",
-          headers: notionH(),
-          body: JSON.stringify({ archived: true })
+        return res.status(500).json({
+          error: "NOTION_TOKEN mancante"
         });
-        const d = await r.json();
+      }
+
+      const pageId =
+        (body.pageId || "")
+          .toString()
+          .trim();
+
+      if (!pageId) {
+        return res.status(400).json({
+          error: "pageId mancante"
+        });
+      }
+
+      try {
+        const r =
+          await fetch(
+            "https://api.notion.com/v1/pages/" +
+              pageId,
+            {
+              method: "PATCH",
+              headers:
+                notionH(),
+              body:
+                JSON.stringify({
+                  archived: true
+                })
+            }
+          );
+
+        const d =
+          await r.json();
+
         if (!r.ok) {
-          return res.status(r.status).json({ error: d?.message || "Errore eliminazione" });
+          return res.status(r.status).json({
+            error:
+              d?.message ||
+              "Errore eliminazione"
+          });
         }
-        return res.status(200).json({ ok: true });
+
+        return res.status(200).json({
+          ok: true
+        });
       } catch (e) {
-        return res.status(500).json({ error: String(e.message || e) });
+        return res.status(500).json({
+          error: String(e.message || e)
+        });
       }
     }
 
@@ -1083,47 +1772,144 @@ export default async function handler(req, res) {
     // ============================================================
     if (body.action === "midas_read") {
       if (!process.env.NOTION_TOKEN) {
-        return res.status(500).json({ error: "NOTION_TOKEN mancante" });
-      }
-      const dbId = (body.databaseId || "").toString().replace(/-/g, "").trim();
-      if (!dbId) {
-        return res.status(400).json({ error: "databaseId mancante" });
-      }
-      try {
-        const schema = await notionSchema(dbId);
-        const kImporto = findProp(schema, ["Importo"]);
-        const kTipo = findProp(schema, ["Tipo"]);
-        const kCategoria = findProp(schema, ["Categoria"]);
-        const kStato = findProp(schema, ["Stato"]);
-        const kData = findProp(schema, ["Data"]);
-        const kRicorrenza = findProp(schema, ["Ricorrenza"]);
-        const kMesiDurata = findProp(schema, ["Mesi durata", "Mesi", "Durata"]);
-        const kFatturato = findProp(schema, ["Fatturato"]);
-
-        const rows = await notionQuery(dbId);
-        const movimenti = rows.map((pg) => {
-          const pr = pg.properties || {};
-          const out = {};
-          for (const [k, v] of Object.entries(pr)) {
-            out[k] = readProp(v);
-          }
-          return out;
+        return res.status(500).json({
+          error: "NOTION_TOKEN mancante"
         });
+      }
 
-        const now = new Date();
+      const dbId =
+        (body.databaseId || "")
+          .toString()
+          .replace(/-/g, "")
+          .trim();
+
+      if (!dbId) {
+        return res.status(400).json({
+          error: "databaseId mancante"
+        });
+      }
+
+      try {
+        const schema =
+          await notionSchema(dbId);
+
+        const kImporto =
+          findProp(
+            schema,
+            ["Importo"]
+          );
+
+        const kTipo =
+          findProp(
+            schema,
+            ["Tipo"]
+          );
+
+        const kCategoria =
+          findProp(
+            schema,
+            ["Categoria"]
+          );
+
+        const kStato =
+          findProp(
+            schema,
+            ["Stato"]
+          );
+
+        const kData =
+          findProp(
+            schema,
+            ["Data"]
+          );
+
+        const kRicorrenza =
+          findProp(
+            schema,
+            ["Ricorrenza"]
+          );
+
+        const kMesiDurata =
+          findProp(
+            schema,
+            [
+              "Mesi durata",
+              "Mesi",
+              "Durata"
+            ]
+          );
+
+        const kFatturato =
+          findProp(
+            schema,
+            ["Fatturato"]
+          );
+
+        const rows =
+          await notionQuery(dbId);
+
+        const movimenti =
+          rows.map((pg) => {
+            const pr =
+              pg.properties || {};
+
+            const out = {};
+
+            for (
+              const [k, v] of
+              Object.entries(pr)
+            ) {
+              out[k] =
+                readProp(v);
+            }
+
+            return out;
+          });
+
+        const now =
+          new Date();
+
         const meseCorrente =
-          now.getFullYear() + "-" + String(now.getMonth() + 1).padStart(2, "0");
+          now.getFullYear() +
+          "-" +
+          String(
+            now.getMonth() + 1
+          ).padStart(
+            2,
+            "0"
+          );
 
-        const mesiTrascorsi = (dataStart) => {
-          if (!dataStart) return 1;
-          const d = new Date(dataStart);
-          if (isNaN(d)) return 1;
-          let m =
-            (now.getFullYear() - d.getFullYear()) * 12 +
-            (now.getMonth() - d.getMonth()) +
-            1;
-          return m < 1 ? 0 : m;
-        };
+        const mesiTrascorsi =
+          (dataStart) => {
+            if (!dataStart) {
+              return 1;
+            }
+
+            const d =
+              new Date(
+                dataStart
+              );
+
+            if (isNaN(d)) {
+              return 1;
+            }
+
+            let m =
+              (
+                now.getFullYear() -
+                d.getFullYear()
+              ) *
+                12 +
+              (
+                now.getMonth() -
+                d.getMonth()
+              ) +
+              1;
+
+            return m < 1
+              ? 0
+              : m;
+          };
 
         let entrate = 0;
         let uscite = 0;
@@ -1132,146 +1918,340 @@ export default async function handler(req, res) {
         let entrateMese = 0;
         let usciteMese = 0;
 
-        for (const m of movimenti) {
-          const impMensile = Number(kImporto ? m[kImporto] : 0) || 0;
-          const tipo = norm(kTipo ? m[kTipo] : "");
-          const cat = norm(kCategoria ? m[kCategoria] : "");
-          const dataStr = kData ? m[kData] : null;
-          const ric = norm(kRicorrenza ? m[kRicorrenza] : "");
+        for (
+          const m of movimenti
+        ) {
+          const impMensile =
+            Number(
+              kImporto
+                ? m[kImporto]
+                : 0
+            ) || 0;
+
+          const tipo =
+            norm(
+              kTipo
+                ? m[kTipo]
+                : ""
+            );
+
+          const cat =
+            norm(
+              kCategoria
+                ? m[kCategoria]
+                : ""
+            );
+
+          const dataStr =
+            kData
+              ? m[kData]
+              : null;
+
+          const ric =
+            norm(
+              kRicorrenza
+                ? m[kRicorrenza]
+                : ""
+            );
 
           const isUnaTantum =
-            ric.includes("tantum") || ric.includes("una tantum") || (!ric && true);
+            ric.includes(
+              "tantum"
+            ) ||
+            ric.includes(
+              "una tantum"
+            ) ||
+            (!ric && true);
 
-          const mesiDur = isUnaTantum
-            ? 1
-            : Number(kMesiDurata ? m[kMesiDurata] : 0) ||
-              (ric.includes("trimestr")
-                ? 3
-                : ric.includes("semestr")
-                ? 6
-                : ric.includes("annual")
-                ? 12
-                : ric.includes("mensile")
-                ? 12
-                : 1);
+          const mesiDur =
+            isUnaTantum
+              ? 1
+              : Number(
+                  kMesiDurata
+                    ? m[kMesiDurata]
+                    : 0
+                ) ||
+                (
+                  ric.includes(
+                    "trimestr"
+                  )
+                    ? 3
+                    : ric.includes(
+                        "semestr"
+                      )
+                    ? 6
+                    : ric.includes(
+                        "annual"
+                      )
+                    ? 12
+                    : ric.includes(
+                        "mensile"
+                      )
+                    ? 12
+                    : 1
+                );
 
-          const isFatturato = kFatturato
-            ? norm(m[kFatturato]).startsWith("s")
-            : !(cat.includes("da fatturare") || cat.includes("non fatturato"));
+          const isFatturato =
+            kFatturato
+              ? norm(
+                  m[kFatturato]
+                ).startsWith(
+                  "s"
+                )
+              : !(
+                  cat.includes(
+                    "da fatturare"
+                  ) ||
+                  cat.includes(
+                    "non fatturato"
+                  )
+                );
 
           const isUscita =
-            tipo.includes("uscita") ||
-            cat.includes("spesa") ||
-            cat.includes("fotografo") ||
-            cat.includes("videomaker") ||
-            cat.includes("modella");
+            tipo.includes(
+              "uscita"
+            ) ||
+            cat.includes(
+              "spesa"
+            ) ||
+            cat.includes(
+              "fotografo"
+            ) ||
+            cat.includes(
+              "videomaker"
+            ) ||
+            cat.includes(
+              "modella"
+            );
 
-          const mesiOk = isUnaTantum
-            ? 1
-            : Math.min(Math.max(mesiTrascorsi(dataStr), 1), mesiDur);
+          const mesiOk =
+            isUnaTantum
+              ? 1
+              : Math.min(
+                  Math.max(
+                    mesiTrascorsi(
+                      dataStr
+                    ),
+                    1
+                  ),
+                  mesiDur
+                );
 
-          const maturato = impMensile * mesiOk;
+          const maturato =
+            impMensile *
+            mesiOk;
 
-          const attivaOra = isUnaTantum
-            ? false
-            : mesiTrascorsi(dataStr) <= mesiDur && mesiTrascorsi(dataStr) >= 1;
+          const attivaOra =
+            isUnaTantum
+              ? false
+              : mesiTrascorsi(
+                  dataStr
+                ) <=
+                  mesiDur &&
+                mesiTrascorsi(
+                  dataStr
+                ) >= 1;
 
           const nelMeseCorrente =
             dataStr &&
-            new Date(dataStr).getFullYear() +
+            new Date(
+              dataStr
+            ).getFullYear() +
               "-" +
-              String(new Date(dataStr).getMonth() + 1).padStart(2, "0") ===
+              String(
+                new Date(
+                  dataStr
+                ).getMonth() +
+                  1
+              ).padStart(
+                2,
+                "0"
+              ) ===
               meseCorrente;
 
           if (isUscita) {
-            uscite += Math.abs(maturato);
+            uscite +=
+              Math.abs(
+                maturato
+              );
+
             if (attivaOra) {
-              usciteMese += Math.abs(impMensile);
-            } else if (nelMeseCorrente) {
-              usciteMese += Math.abs(impMensile);
+              usciteMese +=
+                Math.abs(
+                  impMensile
+                );
+            } else if (
+              nelMeseCorrente
+            ) {
+              usciteMese +=
+                Math.abs(
+                  impMensile
+                );
             }
           } else {
-            entrate += Math.abs(maturato);
+            entrate +=
+              Math.abs(
+                maturato
+              );
+
             if (attivaOra) {
-              entrateMese += Math.abs(impMensile);
-            } else if (nelMeseCorrente) {
-              entrateMese += Math.abs(impMensile);
+              entrateMese +=
+                Math.abs(
+                  impMensile
+                );
+            } else if (
+              nelMeseCorrente
+            ) {
+              entrateMese +=
+                Math.abs(
+                  impMensile
+                );
             }
+
             if (isFatturato) {
-              fatturato += Math.abs(maturato);
+              fatturato +=
+                Math.abs(
+                  maturato
+                );
             } else {
-              daFatturare += Math.abs(maturato);
+              daFatturare +=
+                Math.abs(
+                  maturato
+                );
             }
           }
         }
 
-        const meseDaGennaio2026 = () => {
-          const g = new Date(2026, 0, 1);
-          let m =
-            (now.getFullYear() - g.getFullYear()) * 12 +
-            (now.getMonth() - g.getMonth()) +
-            1;
-          return m < 1 ? 0 : m;
-        };
-
-        const mesiCoop = meseDaGennaio2026();
-        const extraCoopMensile = 60 * mesiCoop;
-        const extraCoopSito = 500;
-        const extraFuroreMensile = 500;
-        const extraFuroreTot = extraFuroreMensile * mesiCoop;
-        const incassiExtraTotale = extraFuroreTot + extraCoopMensile + extraCoopSito;
-        const incassiExtraMese = extraFuroreMensile + 60;
-
-        entrate += incassiExtraTotale;
-        daFatturare += incassiExtraTotale;
-        entrateMese += incassiExtraMese;
+        // ========================================================
+        // NESSUN IMPORTO HARDCODED
+        //
+        // Furore, Coop e qualsiasi altro cliente devono essere
+        // presenti realmente nel database Notion.
+        // ========================================================
 
         const COEFF = 0.78;
         const IMPOSTA = 0.05;
         const INPS = 0.2607;
 
-        const imponibile = fatturato * COEFF;
-        const impostaSost = imponibile * IMPOSTA;
-        const contributiInps = imponibile * INPS;
-        const daAccantonare = impostaSost + contributiInps;
+        const imponibile =
+          fatturato *
+          COEFF;
 
-        const r2 = (n) => Math.round(n * 100) / 100;
+        const impostaSost =
+          imponibile *
+          IMPOSTA;
+
+        const contributiInps =
+          imponibile *
+          INPS;
+
+        const daAccantonare =
+          impostaSost +
+          contributiInps;
+
+        const r2 = (n) =>
+          Math.round(
+            n * 100
+          ) / 100;
 
         return res.status(200).json({
           ok: true,
+
           movimenti,
+
           conti: {
-            entrate: r2(entrate),
-            uscite: r2(uscite),
-            saldo: r2(entrate - uscite),
-            fatturato: r2(fatturato),
-            daFatturare: r2(daFatturare),
+            entrate:
+              r2(entrate),
+
+            uscite:
+              r2(uscite),
+
+            saldo:
+              r2(
+                entrate -
+                uscite
+              ),
+
+            fatturato:
+              r2(fatturato),
+
+            daFatturare:
+              r2(
+                daFatturare
+              ),
+
             meseCorrente: {
-              label: meseCorrente,
-              entrate: r2(entrateMese),
-              uscite: r2(usciteMese),
-              saldo: r2(entrateMese - usciteMese)
+              label:
+                meseCorrente,
+
+              entrate:
+                r2(
+                  entrateMese
+                ),
+
+              uscite:
+                r2(
+                  usciteMese
+                ),
+
+              saldo:
+                r2(
+                  entrateMese -
+                  usciteMese
+                )
             },
+
+            // Compatibilità con il frontend esistente.
+            // Nessun importo extra viene aggiunto automaticamente.
             extra: {
-              furoreMensile: 500,
-              coopMensile: 60,
-              coopSito: 500,
-              mesiConteggiati: mesiCoop,
-              incassiExtraTotale: r2(incassiExtraTotale)
+              hardcoded: false,
+              furoreMensile: 0,
+              coopMensile: 0,
+              coopSito: 0,
+              mesiConteggiati: 0,
+              incassiExtraTotale: 0
             },
+
             fiscale: {
-              coefficiente: COEFF,
-              aliquotaImposta: IMPOSTA,
-              aliquotaInps: INPS,
-              imponibile: r2(imponibile),
-              impostaSostitutiva: r2(impostaSost),
-              contributiInps: r2(contributiInps),
-              daAccantonare: r2(daAccantonare)
+              coefficiente:
+                COEFF,
+
+              aliquotaImposta:
+                IMPOSTA,
+
+              aliquotaInps:
+                INPS,
+
+              imponibile:
+                r2(
+                  imponibile
+                ),
+
+              impostaSostitutiva:
+                r2(
+                  impostaSost
+                ),
+
+              contributiInps:
+                r2(
+                  contributiInps
+                ),
+
+              daAccantonare:
+                r2(
+                  daAccantonare
+                )
             }
           }
         });
       } catch (e) {
-        return res.status(500).json({ error: String(e.message || e) });
+        return res.status(500).json({
+          error:
+            String(
+              e.message ||
+              e
+            )
+        });
       }
     }
 
@@ -1280,57 +2260,197 @@ export default async function handler(req, res) {
     // ============================================================
     if (body.action === "midas_write") {
       if (!process.env.NOTION_TOKEN) {
-        return res.status(500).json({ error: "NOTION_TOKEN mancante" });
+        return res.status(500).json({
+          error: "NOTION_TOKEN mancante"
+        });
       }
-      const dbId = (body.databaseId || "").toString().replace(/-/g, "").trim();
+
+      const dbId =
+        (body.databaseId || "")
+          .toString()
+          .replace(/-/g, "")
+          .trim();
+
       if (!dbId) {
-        return res.status(400).json({ error: "databaseId mancante" });
+        return res.status(400).json({
+          error: "databaseId mancante"
+        });
       }
-      const dati = body.dati || {};
+
+      const dati =
+        body.dati || {};
+
       try {
-        const schema = await notionSchema(dbId);
+        const schema =
+          await notionSchema(dbId);
+
         const props = {};
+
         const map = [
-          { al: ["Descrizione", "Nome", "Name"], v: dati.descrizione },
-          { al: ["Tipo"], v: dati.tipo },
-          { al: ["Categoria"], v: dati.categoria },
-          { al: ["Cliente", "Clienti"], v: dati.cliente },
-          { al: ["Importo"], v: dati.importo },
-          { al: ["Stato"], v: dati.stato },
-          { al: ["Data"], v: dati.data }
+          {
+            al: ["Descrizione", "Nome", "Name"],
+            v: dati.descrizione
+          },
+          {
+            al: ["Tipo"],
+            v: dati.tipo
+          },
+          {
+            al: ["Categoria"],
+            v: dati.categoria
+          },
+          {
+            al: ["Cliente", "Clienti"],
+            v: dati.cliente
+          },
+          {
+            al: ["Importo"],
+            v: dati.importo
+          },
+          {
+            al: ["Stato"],
+            v: dati.stato
+          },
+          {
+            al: ["Data"],
+            v: dati.data
+          }
         ];
 
-        for (const m of map) {
-          if (m.v == null || m.v === "") continue;
-          const key = findProp(schema, m.al);
-          if (!key) continue;
-          const realType = schema[key].type;
+        for (
+          const m of map
+        ) {
+          if (
+            m.v == null ||
+            m.v === ""
+          ) {
+            continue;
+          }
 
-          if (realType === "title") {
-            props[key] = { title: [{ text: { content: String(m.v).slice(0, 200) } }] };
-          } else if (realType === "rich_text") {
-            props[key] = { rich_text: [{ text: { content: String(m.v).slice(0, 1800) } }] };
-          } else if (realType === "select") {
-            props[key] = { select: { name: String(m.v).slice(0, 100) } };
-          } else if (realType === "number") {
-            props[key] = { number: Number(m.v) };
-          } else if (realType === "date") {
-            props[key] = { date: { start: String(m.v) } };
+          const key =
+            findProp(
+              schema,
+              m.al
+            );
+
+          if (!key) {
+            continue;
+          }
+
+          const realType =
+            schema[key].type;
+
+          if (
+            realType === "title"
+          ) {
+            props[key] = {
+              title: [
+                {
+                  text: {
+                    content:
+                      String(m.v)
+                        .slice(
+                          0,
+                          200
+                        )
+                  }
+                }
+              ]
+            };
+          } else if (
+            realType ===
+            "rich_text"
+          ) {
+            props[key] = {
+              rich_text: [
+                {
+                  text: {
+                    content:
+                      String(m.v)
+                        .slice(
+                          0,
+                          1800
+                        )
+                  }
+                }
+              ]
+            };
+          } else if (
+            realType === "select"
+          ) {
+            props[key] = {
+              select: {
+                name:
+                  String(m.v)
+                    .slice(
+                      0,
+                      100
+                    )
+              }
+            };
+          } else if (
+            realType === "number"
+          ) {
+            props[key] = {
+              number:
+                Number(m.v)
+            };
+          } else if (
+            realType === "date"
+          ) {
+            props[key] = {
+              date: {
+                start:
+                  String(m.v)
+              }
+            };
           }
         }
 
-        const r = await fetch("https://api.notion.com/v1/pages", {
-          method: "POST",
-          headers: notionH(),
-          body: JSON.stringify({ parent: { database_id: dbId }, properties: props })
-        });
-        const d = await r.json();
+        const r =
+          await fetch(
+            "https://api.notion.com/v1/pages",
+            {
+              method: "POST",
+              headers:
+                notionH(),
+
+              body:
+                JSON.stringify({
+                  parent: {
+                    database_id:
+                      dbId
+                  },
+
+                  properties:
+                    props
+                })
+            }
+          );
+
+        const d =
+          await r.json();
+
         if (!r.ok) {
-          return res.status(r.status).json({ error: d?.message || "Errore creazione movimento" });
+          return res.status(r.status).json({
+            error:
+              d?.message ||
+              "Errore creazione movimento"
+          });
         }
-        return res.status(200).json({ ok: true, url: d.url || null });
+
+        return res.status(200).json({
+          ok: true,
+          url: d.url || null
+        });
       } catch (e) {
-        return res.status(500).json({ error: String(e.message || e) });
+        return res.status(500).json({
+          error:
+            String(
+              e.message ||
+              e
+            )
+        });
       }
     }
 
@@ -1339,72 +2459,204 @@ export default async function handler(req, res) {
     // ============================================================
     if (body.action === "notion") {
       if (!process.env.NOTION_TOKEN) {
-        return res.status(500).json({ error: "NOTION_TOKEN mancante" });
-      }
-      const databaseId = (body.databaseId || "").toString().replace(/-/g, "").trim();
-      if (!databaseId) {
-        return res.status(400).json({ error: "databaseId mancante" });
+        return res.status(500).json({
+          error: "NOTION_TOKEN mancante"
+        });
       }
 
-      const dbr = await fetch(`https://api.notion.com/v1/databases/${databaseId}`, {
-        headers: notionH()
-      });
-      const db = await dbr.json();
+      const databaseId =
+        (body.databaseId || "")
+          .toString()
+          .replace(/-/g, "")
+          .trim();
+
+      if (!databaseId) {
+        return res.status(400).json({
+          error: "databaseId mancante"
+        });
+      }
+
+      const dbr =
+        await fetch(
+          `https://api.notion.com/v1/databases/${databaseId}`,
+          {
+            headers:
+              notionH()
+          }
+        );
+
+      const db =
+        await dbr.json();
+
       if (!dbr.ok) {
-        return res.status(dbr.status).json({ error: db?.message || "Errore lettura database Notion" });
+        return res.status(dbr.status).json({
+          error:
+            db?.message ||
+            "Errore lettura database Notion"
+        });
       }
 
       let titleProp = "Name";
-      for (const [k, v] of Object.entries(db.properties || {})) {
-        if (v && v.type === "title") {
+
+      for (
+        const [k, v] of
+        Object.entries(
+          db.properties || {}
+        )
+      ) {
+        if (
+          v &&
+          v.type === "title"
+        ) {
           titleProp = k;
           break;
         }
       }
 
-      const title = (body.title || "Relazione CORTEX").toString().slice(0, 200);
-      const finalText = (body.finalText || "").toString();
-      const sections = Array.isArray(body.sections) ? body.sections : [];
+      const title =
+        (
+          body.title ||
+          "Relazione CORTEX"
+        )
+          .toString()
+          .slice(
+            0,
+            200
+          );
+
+      const finalText =
+        (body.finalText || "")
+          .toString();
+
+      const sections =
+        Array.isArray(
+          body.sections
+        )
+          ? body.sections
+          : [];
 
       const h2 = (t) => ({
         object: "block",
         type: "heading_2",
+
         heading_2: {
-          rich_text: [{ type: "text", text: { content: (t || "").toString().slice(0, 200) } }]
+          rich_text: [
+            {
+              type: "text",
+
+              text: {
+                content:
+                  (t || "")
+                    .toString()
+                    .slice(
+                      0,
+                      200
+                    )
+              }
+            }
+          ]
         }
       });
 
       const para = (t) => ({
         object: "block",
         type: "paragraph",
-        paragraph: { rich_text: chunkText(t) }
+
+        paragraph: {
+          rich_text:
+            chunkText(t)
+        }
       });
 
-      const children = [h2("Sintesi CORTEX")];
-      if (finalText) children.push(para(finalText));
+      const children = [
+        h2("Sintesi CORTEX")
+      ];
 
-      for (const s of sections) {
-        children.push(h2((s.name || "Organo") + (s.count ? " (" + s.count + ")" : "")));
-        children.push(para(s.text || ""));
+      if (finalText) {
+        children.push(
+          para(finalText)
+        );
+      }
+
+      for (
+        const s of sections
+      ) {
+        children.push(
+          h2(
+            (s.name || "Organo") +
+              (
+                s.count
+                  ? " (" +
+                    s.count +
+                    ")"
+                  : ""
+              )
+          )
+        );
+
+        children.push(
+          para(
+            s.text || ""
+          )
+        );
       }
 
       const payload = {
-        parent: { database_id: databaseId },
-        properties: { [titleProp]: { title: [{ text: { content: title } }] } },
-        children: children.slice(0, 100)
+        parent: {
+          database_id:
+            databaseId
+        },
+
+        properties: {
+          [titleProp]: {
+            title: [
+              {
+                text: {
+                  content:
+                    title
+                }
+              }
+            ]
+          }
+        },
+
+        children:
+          children.slice(
+            0,
+            100
+          )
       };
 
-      const pr = await fetch("https://api.notion.com/v1/pages", {
-        method: "POST",
-        headers: notionH(),
-        body: JSON.stringify(payload)
-      });
-      const pd = await pr.json();
+      const pr =
+        await fetch(
+          "https://api.notion.com/v1/pages",
+          {
+            method: "POST",
+            headers:
+              notionH(),
+
+            body:
+              JSON.stringify(
+                payload
+              )
+          }
+        );
+
+      const pd =
+        await pr.json();
+
       if (!pr.ok) {
-        return res.status(pr.status).json({ error: pd?.message || "Errore creazione pagina Notion" });
+        return res.status(pr.status).json({
+          error:
+            pd?.message ||
+            "Errore creazione pagina Notion"
+        });
       }
 
-      return res.status(200).json({ ok: true, url: pd.url || null });
+      return res.status(200).json({
+        ok: true,
+        url: pd.url || null
+      });
     }
 
     // ============================================================
@@ -1412,52 +2664,149 @@ export default async function handler(req, res) {
     // ============================================================
     if (body.action === "log") {
       if (!process.env.NOTION_TOKEN) {
-        return res.status(500).json({ error: "NOTION_TOKEN mancante" });
+        return res.status(500).json({
+          error: "NOTION_TOKEN mancante"
+        });
       }
-      const databaseId = (body.databaseId || "").toString().replace(/-/g, "").trim();
+
+      const databaseId =
+        (body.databaseId || "")
+          .toString()
+          .replace(/-/g, "")
+          .trim();
+
       if (!databaseId) {
-        return res.status(400).json({ error: "databaseId mancante" });
+        return res.status(400).json({
+          error: "databaseId mancante"
+        });
       }
 
-      const dbr = await fetch(`https://api.notion.com/v1/databases/${databaseId}`, {
-        headers: notionH()
-      });
-      const db = await dbr.json();
+      const dbr =
+        await fetch(
+          `https://api.notion.com/v1/databases/${databaseId}`,
+          {
+            headers:
+              notionH()
+          }
+        );
+
+      const db =
+        await dbr.json();
+
       if (!dbr.ok) {
-        return res.status(dbr.status).json({ error: db?.message || "Errore lettura database Notion" });
+        return res.status(dbr.status).json({
+          error:
+            db?.message ||
+            "Errore lettura database Notion"
+        });
       }
 
-      let titleProp = "Name";
-      for (const [k, v] of Object.entries(db.properties || {})) {
-        if (v.type === "title") {
+      let titleProp =
+        "Name";
+
+      for (
+        const [k, v] of
+        Object.entries(
+          db.properties || {}
+        )
+      ) {
+        if (
+          v.type === "title"
+        ) {
           titleProp = k;
           break;
         }
       }
 
-      const line = (body.text || "").toString().slice(0, 1800);
-      const organo = (body.organo || "").toString();
-      const title = (organo ? organo + ": " : "") + line.slice(0, 90);
+      const line =
+        (body.text || "")
+          .toString()
+          .slice(
+            0,
+            1800
+          );
+
+      const organo =
+        (body.organo || "")
+          .toString();
+
+      const title =
+        (
+          organo
+            ? organo + ": "
+            : ""
+        ) +
+        line.slice(
+          0,
+          90
+        );
 
       const payload = {
-        parent: { database_id: databaseId },
-        properties: { [titleProp]: { title: [{ text: { content: title || "log" } }] } },
+        parent: {
+          database_id:
+            databaseId
+        },
+
+        properties: {
+          [titleProp]: {
+            title: [
+              {
+                text: {
+                  content:
+                    title ||
+                    "log"
+                }
+              }
+            ]
+          }
+        },
+
         children: [
-          { object: "block", type: "paragraph", paragraph: { rich_text: chunkText(line) } }
+          {
+            object: "block",
+
+            type:
+              "paragraph",
+
+            paragraph: {
+              rich_text:
+                chunkText(
+                  line
+                )
+            }
+          }
         ]
       };
 
-      const pr = await fetch("https://api.notion.com/v1/pages", {
-        method: "POST",
-        headers: notionH(),
-        body: JSON.stringify(payload)
-      });
-      const pd = await pr.json();
+      const pr =
+        await fetch(
+          "https://api.notion.com/v1/pages",
+          {
+            method: "POST",
+            headers:
+              notionH(),
+
+            body:
+              JSON.stringify(
+                payload
+              )
+          }
+        );
+
+      const pd =
+        await pr.json();
+
       if (!pr.ok) {
-        return res.status(pr.status).json({ error: pd?.message || "Errore log Notion" });
+        return res.status(pr.status).json({
+          error:
+            pd?.message ||
+            "Errore log Notion"
+        });
       }
 
-      return res.status(200).json({ ok: true });
+      return res.status(200).json({
+        ok: true
+      });
     }
 
     // ============================================================
@@ -1465,330 +2814,848 @@ export default async function handler(req, res) {
     // ============================================================
     if (body.action === "log_read") {
       if (!process.env.NOTION_TOKEN) {
-        return res.status(500).json({ error: "NOTION_TOKEN mancante" });
+        return res.status(500).json({
+          error: "NOTION_TOKEN mancante"
+        });
       }
-      const databaseId = (body.databaseId || "").toString().replace(/-/g, "").trim();
+
+      const databaseId =
+        (body.databaseId || "")
+          .toString()
+          .replace(/-/g, "")
+          .trim();
+
       if (!databaseId) {
-        return res.status(400).json({ error: "databaseId mancante" });
+        return res.status(400).json({
+          error: "databaseId mancante"
+        });
       }
 
-      const since = new Date();
-      since.setHours(0, 0, 0, 0);
+      const since =
+        new Date();
 
-      const pr = await fetch(`https://api.notion.com/v1/databases/${databaseId}/query`, {
-        method: "POST",
-        headers: notionH(),
-        body: JSON.stringify({
-          filter: {
-            timestamp: "created_time",
-            created_time: { on_or_after: since.toISOString() }
-          },
-          page_size: 100
-        })
-      });
-      const pd = await pr.json();
-      if (!pr.ok) {
-        return res.status(pr.status).json({ error: pd?.message || "Errore lettura log" });
-      }
+      since.setHours(
+        0,
+        0,
+        0,
+        0
+      );
 
-      const items = (pd.results || [])
-        .map((p) => {
-          const props = p.properties || {};
-          let title = "";
-          for (const v of Object.values(props)) {
-            if (v.type === "title") {
-              title = (v.title || []).map((t) => t.plain_text).join("");
-              break;
-            }
+      const pr =
+        await fetch(
+          `https://api.notion.com/v1/databases/${databaseId}/query`,
+          {
+            method: "POST",
+            headers:
+              notionH(),
+
+            body:
+              JSON.stringify({
+                filter: {
+                  timestamp:
+                    "created_time",
+
+                  created_time: {
+                    on_or_after:
+                      since.toISOString()
+                  }
+                },
+
+                page_size: 100
+              })
           }
-          return title;
-        })
-        .filter(Boolean);
+        );
 
-      return res.status(200).json({ items });
+      const pd =
+        await pr.json();
+
+      if (!pr.ok) {
+        return res.status(pr.status).json({
+          error:
+            pd?.message ||
+            "Errore lettura log"
+        });
+      }
+
+      const items =
+        (pd.results || [])
+          .map((p) => {
+            const props =
+              p.properties || {};
+
+            let title = "";
+
+            for (
+              const v of
+              Object.values(
+                props
+              )
+            ) {
+              if (
+                v.type ===
+                "title"
+              ) {
+                title =
+                  (v.title || [])
+                    .map(
+                      (t) =>
+                        t.plain_text
+                    )
+                    .join("");
+
+                break;
+              }
+            }
+
+            return title;
+          })
+          .filter(Boolean);
+
+      return res.status(200).json({
+        items
+      });
     }
 
     // ============================================================
     // CHAT DEGLI AGENTI — GEMINI + FALLBACK OPENROUTER + GROQ
     // ============================================================
-    const { system, messages } = body;
+    const {
+      system,
+      messages
+    } = body;
 
-    if (!Array.isArray(messages)) {
-      return res.status(400).json({ error: "messages mancante" });
+    if (
+      !Array.isArray(
+        messages
+      )
+    ) {
+      return res.status(400).json({
+        error:
+          "messages mancante"
+      });
     }
 
-    const toGeminiContents = (inputMessages) =>
-      inputMessages.map((m) => {
-        const role = m.role === "assistant" ? "model" : "user";
-        const parts = [];
+    const toGeminiContents =
+      (inputMessages) =>
+        inputMessages.map(
+          (m) => {
+            const role =
+              m.role ===
+              "assistant"
+                ? "model"
+                : "user";
 
-        if (typeof m.content === "string") {
-          parts.push({ text: m.content });
-        } else if (Array.isArray(m.content)) {
-          for (const b of m.content) {
-            if (b.type === "text") {
-              parts.push({ text: b.text || "" });
-            } else if (b.type === "image" && b.source?.data) {
+            const parts = [];
+
+            if (
+              typeof m.content ===
+              "string"
+            ) {
               parts.push({
-                inline_data: {
-                  mime_type: b.source.media_type || "image/jpeg",
-                  data: b.source.data
+                text:
+                  m.content
+              });
+            } else if (
+              Array.isArray(
+                m.content
+              )
+            ) {
+              for (
+                const b of
+                m.content
+              ) {
+                if (
+                  b.type ===
+                  "text"
+                ) {
+                  parts.push({
+                    text:
+                      b.text ||
+                      ""
+                  });
+                } else if (
+                  b.type ===
+                    "image" &&
+                  b.source?.data
+                ) {
+                  parts.push({
+                    inline_data: {
+                      mime_type:
+                        b.source
+                          .media_type ||
+                        "image/jpeg",
+
+                      data:
+                        b.source
+                          .data
+                    }
+                  });
+                } else if (
+                  b.type ===
+                    "document" &&
+                  b.source?.data
+                ) {
+                  parts.push({
+                    inline_data: {
+                      mime_type:
+                        b.source
+                          .media_type ||
+                        "application/pdf",
+
+                      data:
+                        b.source
+                          .data
+                    }
+                  });
+                }
+              }
+            }
+
+            if (!parts.length) {
+              parts.push({
+                text: ""
+              });
+            }
+
+            return {
+              role,
+              parts
+            };
+          }
+        );
+
+    const toOpenRouterMessages =
+      (inputMessages) => {
+        const out = [];
+
+        if (system) {
+          out.push({
+            role:
+              "system",
+
+            content:
+              String(
+                system
+              )
+          });
+        }
+
+        for (
+          const m of
+          inputMessages
+        ) {
+          const role =
+            m.role ===
+            "assistant"
+              ? "assistant"
+              : "user";
+
+          if (
+            typeof m.content ===
+            "string"
+          ) {
+            out.push({
+              role,
+              content:
+                m.content
+            });
+
+            continue;
+          }
+
+          if (
+            !Array.isArray(
+              m.content
+            )
+          ) {
+            out.push({
+              role,
+              content: ""
+            });
+
+            continue;
+          }
+
+          const content = [];
+
+          for (
+            const b of
+            m.content
+          ) {
+            if (
+              b.type ===
+              "text"
+            ) {
+              content.push({
+                type: "text",
+                text:
+                  b.text || ""
+              });
+            } else if (
+              b.type ===
+                "image" &&
+              b.source?.data
+            ) {
+              const mime =
+                b.source
+                  .media_type ||
+                "image/jpeg";
+
+              content.push({
+                type:
+                  "image_url",
+
+                image_url: {
+                  url:
+                    `data:${mime};base64,${b.source.data}`
                 }
               });
-            } else if (b.type === "document" && b.source?.data) {
-              parts.push({
-                inline_data: {
-                  mime_type: b.source.media_type || "application/pdf",
-                  data: b.source.data
-                }
+            } else if (
+              b.type ===
+                "document" &&
+              b.source?.data
+            ) {
+              content.push({
+                type: "text",
+
+                text:
+                  "[Documento PDF allegato: il provider di fallback potrebbe non poterlo leggere direttamente.]"
               });
             }
           }
+
+          out.push({
+            role,
+
+            content:
+              content.length
+                ? content
+                : ""
+          });
         }
 
-        if (!parts.length) parts.push({ text: "" });
-        return { role, parts };
-      });
-
-    const toOpenRouterMessages = (inputMessages) => {
-      const out = [];
-      if (system) {
-        out.push({ role: "system", content: String(system) });
-      }
-      for (const m of inputMessages) {
-        const role = m.role === "assistant" ? "assistant" : "user";
-
-        if (typeof m.content === "string") {
-          out.push({ role, content: m.content });
-          continue;
-        }
-        if (!Array.isArray(m.content)) {
-          out.push({ role, content: "" });
-          continue;
-        }
-
-        const content = [];
-        for (const b of m.content) {
-          if (b.type === "text") {
-            content.push({ type: "text", text: b.text || "" });
-          } else if (b.type === "image" && b.source?.data) {
-            const mime = b.source.media_type || "image/jpeg";
-            content.push({
-              type: "image_url",
-              image_url: { url: `data:${mime};base64,${b.source.data}` }
-            });
-          } else if (b.type === "document" && b.source?.data) {
-            content.push({
-              type: "text",
-              text: "[Documento PDF allegato: il provider di fallback potrebbe non poterlo leggere direttamente.]"
-            });
-          }
-        }
-        out.push({ role, content: content.length ? content : "" });
-      }
-      return out;
-    };
-
-    // Groq accetta solo stringhe come content: appiattisco i blocchi.
-    const toGroqMessages = (inputMessages) => {
-      const flat = toOpenRouterMessages(inputMessages);
-      return flat.map((m) => {
-        if (typeof m.content === "string") return m;
-        const text = (m.content || [])
-          .map((c) => (typeof c === "string" ? c : c?.text || ""))
-          .join(" ")
-          .trim();
-        return { role: m.role, content: text };
-      });
-    };
-
-    // PROVIDER 1 — GEMINI
-    const callGemini = async () => {
-      const key = process.env.GEMINI_API_KEY;
-      if (!key) {
-        return { ok: false, status: 503, error: "GEMINI_API_KEY mancante" };
-      }
-
-      const contents = toGeminiContents(messages);
-      const gbody = {
-        contents,
-        generationConfig: { maxOutputTokens: 8192, temperature: 0.7 }
+        return out;
       };
-      if (system) {
-        gbody.systemInstruction = { parts: [{ text: system }] };
-      }
 
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${key}`;
+    // Groq accetta solo stringhe come content
+    const toGroqMessages =
+      (inputMessages) => {
+        const flat =
+          toOpenRouterMessages(
+            inputMessages
+          );
 
-      try {
-        const r = await fetch(url, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(gbody)
-        });
-        const data = await r.json();
-        if (!r.ok) {
+        return flat.map(
+          (m) => {
+            if (
+              typeof m.content ===
+              "string"
+            ) {
+              return m;
+            }
+
+            const text =
+              (m.content || [])
+                .map((c) =>
+                  typeof c ===
+                  "string"
+                    ? c
+                    : c?.text ||
+                      ""
+                )
+                .join(" ")
+                .trim();
+
+            return {
+              role:
+                m.role,
+
+              content:
+                text
+            };
+          }
+        );
+      };
+
+    // ============================================================
+    // PROVIDER 1 — GEMINI
+    // ============================================================
+    const callGemini =
+      async () => {
+        const key =
+          process.env.GEMINI_API_KEY;
+
+        if (!key) {
           return {
             ok: false,
-            status: r.status,
-            error: data?.error?.message || "Errore Gemini",
-            raw: data
+            status: 503,
+            error:
+              "GEMINI_API_KEY mancante"
           };
         }
 
-        const text = (data?.candidates?.[0]?.content?.parts || [])
-          .map((p) => p.text || "")
-          .join("")
-          .trim();
+        const contents =
+          toGeminiContents(
+            messages
+          );
 
-        if (!text) {
-          return { ok: false, status: 502, error: "Gemini non ha restituito testo" };
+        const gbody = {
+          contents,
+
+          generationConfig: {
+            maxOutputTokens:
+              8192,
+
+            temperature:
+              0.7
+          }
+        };
+
+        if (system) {
+          gbody.systemInstruction = {
+            parts: [
+              {
+                text:
+                  system
+              }
+            ]
+          };
         }
 
-        return { ok: true, provider: "gemini", model: MODEL, text };
-      } catch (error) {
-        return { ok: false, status: 503, error: error?.message || "Gemini non raggiungibile" };
-      }
-    };
+        const url =
+          `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${key}`;
 
+        try {
+          const r =
+            await fetch(
+              url,
+              {
+                method:
+                  "POST",
+
+                headers: {
+                  "content-type":
+                    "application/json"
+                },
+
+                body:
+                  JSON.stringify(
+                    gbody
+                  )
+              }
+            );
+
+          const data =
+            await r.json();
+
+          if (!r.ok) {
+            return {
+              ok: false,
+              status:
+                r.status,
+
+              error:
+                data?.error
+                  ?.message ||
+                "Errore Gemini",
+
+              raw:
+                data
+            };
+          }
+
+          const text =
+            (
+              data?.candidates?.[0]
+                ?.content
+                ?.parts || []
+            )
+              .map(
+                (p) =>
+                  p.text || ""
+              )
+              .join("")
+              .trim();
+
+          if (!text) {
+            return {
+              ok: false,
+              status: 502,
+              error:
+                "Gemini non ha restituito testo"
+            };
+          }
+
+          return {
+            ok: true,
+            provider:
+              "gemini",
+            model:
+              MODEL,
+            text
+          };
+        } catch (error) {
+          return {
+            ok: false,
+            status: 503,
+            error:
+              error?.message ||
+              "Gemini non raggiungibile"
+          };
+        }
+      };
+
+    // ============================================================
     // PROVIDER 2 — OPENROUTER
-    const callOpenRouter = async () => {
-      const key = process.env.OPENROUTER_API_KEY;
-      if (!key) {
-        return { ok: false, status: 503, error: "OPENROUTER_API_KEY mancante" };
-      }
+    // ============================================================
+    const callOpenRouter =
+      async () => {
+        const key =
+          process.env.OPENROUTER_API_KEY;
 
-      try {
-        const r = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${key}`,
-            "HTTP-Referer": process.env.CORTEX_PUBLIC_URL || "https://cortex.local",
-            "X-Title": "CORTEX"
-          },
-          body: JSON.stringify({
-            model: process.env.OPENROUTER_MODEL || "openrouter/free",
-            messages: toOpenRouterMessages(messages),
-            temperature: 0.7,
-            max_tokens: 4096,
-            stream: false
-          })
-        });
-        const data = await r.json();
-        if (!r.ok) {
+        if (!key) {
           return {
             ok: false,
-            status: r.status,
-            error: data?.error?.message || "Errore OpenRouter",
-            raw: data
+            status: 503,
+            error:
+              "OPENROUTER_API_KEY mancante"
           };
         }
 
-        let text = data?.choices?.[0]?.message?.content;
-        if (Array.isArray(text)) {
-          text = text
-            .map((part) => {
-              if (typeof part === "string") return part;
-              return part?.text || part?.content || "";
-            })
-            .join("");
-        }
-        text = (text || "").toString().trim();
+        try {
+          const r =
+            await fetch(
+              "https://openrouter.ai/api/v1/chat/completions",
+              {
+                method:
+                  "POST",
 
-        if (!text) {
-          return { ok: false, status: 502, error: "OpenRouter non ha restituito testo" };
-        }
+                headers: {
+                  "Content-Type":
+                    "application/json",
 
-        return {
-          ok: true,
-          provider: "openrouter",
-          model: data?.model || process.env.OPENROUTER_MODEL || "openrouter/free",
-          text
-        };
-      } catch (error) {
-        return { ok: false, status: 503, error: error?.message || "OpenRouter non raggiungibile" };
-      }
-    };
+                  Authorization:
+                    `Bearer ${key}`,
 
-    // PROVIDER 3 — GROQ (veloce, quota giornaliera gratuita, OpenAI-compatibile)
-    const callGroq = async () => {
-      const key = process.env.GROQ_API_KEY;
-      if (!key) {
-        return { ok: false, status: 503, error: "GROQ_API_KEY mancante" };
-      }
+                  "HTTP-Referer":
+                    process.env
+                      .CORTEX_PUBLIC_URL ||
+                    "https://cortex.local",
 
-      try {
-        const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${key}`
-          },
-          body: JSON.stringify({
-            model: process.env.GROQ_MODEL || "llama-3.3-70b-versatile",
-            messages: toGroqMessages(messages),
-            temperature: 0.7,
-            max_tokens: 4096,
-            stream: false
-          })
-        });
-        const data = await r.json();
-        if (!r.ok) {
+                  "X-Title":
+                    "CORTEX"
+                },
+
+                body:
+                  JSON.stringify({
+                    model:
+                      process.env
+                        .OPENROUTER_MODEL ||
+                      "openrouter/free",
+
+                    messages:
+                      toOpenRouterMessages(
+                        messages
+                      ),
+
+                    temperature:
+                      0.7,
+
+                    max_tokens:
+                      4096,
+
+                    stream:
+                      false
+                  })
+              }
+            );
+
+          const data =
+            await r.json();
+
+          if (!r.ok) {
+            return {
+              ok: false,
+              status:
+                r.status,
+
+              error:
+                data?.error
+                  ?.message ||
+                "Errore OpenRouter",
+
+              raw:
+                data
+            };
+          }
+
+          let text =
+            data?.choices?.[0]
+              ?.message
+              ?.content;
+
+          if (
+            Array.isArray(
+              text
+            )
+          ) {
+            text =
+              text
+                .map(
+                  (part) => {
+                    if (
+                      typeof part ===
+                      "string"
+                    ) {
+                      return part;
+                    }
+
+                    return (
+                      part?.text ||
+                      part?.content ||
+                      ""
+                    );
+                  }
+                )
+                .join("");
+          }
+
+          text =
+            (text || "")
+              .toString()
+              .trim();
+
+          if (!text) {
+            return {
+              ok: false,
+              status: 502,
+              error:
+                "OpenRouter non ha restituito testo"
+            };
+          }
+
+          return {
+            ok: true,
+
+            provider:
+              "openrouter",
+
+            model:
+              data?.model ||
+              process.env
+                .OPENROUTER_MODEL ||
+              "openrouter/free",
+
+            text
+          };
+        } catch (error) {
           return {
             ok: false,
-            status: r.status,
-            error: data?.error?.message || "Errore Groq",
-            raw: data
+            status: 503,
+            error:
+              error?.message ||
+              "OpenRouter non raggiungibile"
+          };
+        }
+      };
+
+    // ============================================================
+    // PROVIDER 3 — GROQ
+    // ============================================================
+    const callGroq =
+      async () => {
+        const key =
+          process.env.GROQ_API_KEY;
+
+        if (!key) {
+          return {
+            ok: false,
+            status: 503,
+            error:
+              "GROQ_API_KEY mancante"
           };
         }
 
-        let text = data?.choices?.[0]?.message?.content;
-        if (Array.isArray(text)) {
-          text = text
-            .map((part) => (typeof part === "string" ? part : part?.text || ""))
-            .join("");
+        try {
+          const r =
+            await fetch(
+              "https://api.groq.com/openai/v1/chat/completions",
+              {
+                method:
+                  "POST",
+
+                headers: {
+                  "Content-Type":
+                    "application/json",
+
+                  Authorization:
+                    `Bearer ${key}`
+                },
+
+                body:
+                  JSON.stringify({
+                    model:
+                      process.env
+                        .GROQ_MODEL ||
+                      "llama-3.3-70b-versatile",
+
+                    messages:
+                      toGroqMessages(
+                        messages
+                      ),
+
+                    temperature:
+                      0.7,
+
+                    max_tokens:
+                      4096,
+
+                    stream:
+                      false
+                  })
+              }
+            );
+
+          const data =
+            await r.json();
+
+          if (!r.ok) {
+            return {
+              ok: false,
+
+              status:
+                r.status,
+
+              error:
+                data?.error
+                  ?.message ||
+                "Errore Groq",
+
+              raw:
+                data
+            };
+          }
+
+          let text =
+            data?.choices?.[0]
+              ?.message
+              ?.content;
+
+          if (
+            Array.isArray(
+              text
+            )
+          ) {
+            text =
+              text
+                .map(
+                  (part) =>
+                    typeof part ===
+                    "string"
+                      ? part
+                      : part?.text ||
+                        ""
+                )
+                .join("");
+          }
+
+          text =
+            (text || "")
+              .toString()
+              .trim();
+
+          if (!text) {
+            return {
+              ok: false,
+              status: 502,
+              error:
+                "Groq non ha restituito testo"
+            };
+          }
+
+          return {
+            ok: true,
+
+            provider:
+              "groq",
+
+            model:
+              data?.model ||
+              process.env
+                .GROQ_MODEL ||
+              "llama-3.3-70b-versatile",
+
+            text
+          };
+        } catch (error) {
+          return {
+            ok: false,
+            status: 503,
+
+            error:
+              error?.message ||
+              "Groq non raggiungibile"
+          };
         }
-        text = (text || "").toString().trim();
+      };
 
-        if (!text) {
-          return { ok: false, status: 502, error: "Groq non ha restituito testo" };
-        }
-
-        return {
-          ok: true,
-          provider: "groq",
-          model: data?.model || process.env.GROQ_MODEL || "llama-3.3-70b-versatile",
-          text
-        };
-      } catch (error) {
-        return { ok: false, status: 503, error: error?.message || "Groq non raggiungibile" };
-      }
-    };
-
+    // ============================================================
     // CORTEX AI ROUTER — Gemini → OpenRouter → Groq
-    const gemini = await callGemini();
+    // ============================================================
+    const gemini =
+      await callGemini();
 
     if (gemini.ok) {
       return res.status(200).json({
-        content: [{ type: "text", text: gemini.text }],
-        provider: gemini.provider,
-        model: gemini.model,
-        fallback: false
+        content: [
+          {
+            type: "text",
+            text:
+              gemini.text
+          }
+        ],
+
+        provider:
+          gemini.provider,
+
+        model:
+          gemini.model,
+
+        fallback:
+          false
       });
     }
 
-    console.warn("[CORTEX AI ROUTER] Gemini non disponibile:", gemini.status, gemini.error);
+    console.warn(
+      "[CORTEX AI ROUTER] Gemini non disponibile:",
+      gemini.status,
+      gemini.error
+    );
 
-    const openrouter = await callOpenRouter();
+    const openrouter =
+      await callOpenRouter();
 
     if (openrouter.ok) {
       return res.status(200).json({
-        content: [{ type: "text", text: openrouter.text }],
-        provider: openrouter.provider,
-        model: openrouter.model,
-        fallback: true,
-        fallbackReason: gemini.error
+        content: [
+          {
+            type: "text",
+            text:
+              openrouter.text
+          }
+        ],
+
+        provider:
+          openrouter.provider,
+
+        model:
+          openrouter.model,
+
+        fallback:
+          true,
+
+        fallbackReason:
+          gemini.error
       });
     }
 
@@ -1798,28 +3665,75 @@ export default async function handler(req, res) {
       openrouter.error
     );
 
-    const groq = await callGroq();
+    const groq =
+      await callGroq();
 
     if (groq.ok) {
       return res.status(200).json({
-        content: [{ type: "text", text: groq.text }],
-        provider: groq.provider,
-        model: groq.model,
-        fallback: true,
-        fallbackReason: openrouter.error || gemini.error
+        content: [
+          {
+            type: "text",
+            text:
+              groq.text
+          }
+        ],
+
+        provider:
+          groq.provider,
+
+        model:
+          groq.model,
+
+        fallback:
+          true,
+
+        fallbackReason:
+          openrouter.error ||
+          gemini.error
       });
     }
 
     console.error(
       "[CORTEX AI ROUTER] Nessun motore disponibile:",
-      "gemini=", gemini.error, "| openrouter=", openrouter.error, "| groq=", groq.error
+      "gemini=",
+      gemini.error,
+      "| openrouter=",
+      openrouter.error,
+      "| groq=",
+      groq.error
     );
 
-    return res.status(groq.status || openrouter.status || gemini.status || 503).json({
-      error: "Nessun motore AI disponibile in questo momento.",
-      details: { gemini: gemini.error, openrouter: openrouter.error, groq: groq.error }
-    });
+    return res
+      .status(
+        groq.status ||
+          openrouter.status ||
+          gemini.status ||
+          503
+      )
+      .json({
+        error:
+          "Nessun motore AI disponibile in questo momento.",
+
+        details: {
+          gemini:
+            gemini.error,
+
+          openrouter:
+            openrouter.error,
+
+          groq:
+            groq.error
+        }
+      });
   } catch (e) {
-    return res.status(500).json({ error: String(e && e.message ? e.message : e) });
+    return res.status(500).json({
+      error:
+        String(
+          e &&
+          e.message
+            ? e.message
+            : e
+        )
+    });
   }
 }
