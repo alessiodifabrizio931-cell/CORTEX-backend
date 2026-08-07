@@ -775,7 +775,7 @@ export default async function handler(req, res) {
       const to = (body.to || "").toString().trim();
       const subject = (body.subject || "").toString().trim();
       const html = (body.html || "").toString();
-      const from = (body.from || "CORTEX X Studio <onboarding@resend.dev>").toString();
+      const from = (body.from || "X Studio <oculus@xstudioportfolio.it>").toString();
       if (!to || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to)) {
         return res.status(400).json({ error: "email destinatario non valida" });
       }
