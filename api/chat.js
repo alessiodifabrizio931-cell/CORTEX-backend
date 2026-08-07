@@ -1018,6 +1018,40 @@ export default async function handler(req, res) {
     }
 
     // ============================================================
+    // MIDAS / NOTION — SVUOTA DATABASE (archivia tutte le righe)
+    // ============================================================
+    if (body.action === "midas_clear" || body.action === "notion_clear") {
+      if (!process.env.NOTION_TOKEN) {
+        return res.status(500).json({ error: "NOTION_TOKEN mancante" });
+      }
+      const dbId = (body.databaseId || "").toString().replace(/-/g, "").trim();
+      if (!dbId) {
+        return res.status(400).json({ error: "databaseId mancante" });
+      }
+      try {
+        let archiviate = 0;
+        let totali = 0;
+        // ripeti finché il database ha righe (max 10 giri da 100)
+        for (let giro = 0; giro < 10; giro++) {
+          const rows = await notionQuery(dbId);
+          if (!rows.length) break;
+          totali += rows.length;
+          for (const pg of rows) {
+            const r = await fetch("https://api.notion.com/v1/pages/" + pg.id, {
+              method: "PATCH",
+              headers: notionH(),
+              body: JSON.stringify({ archived: true })
+            });
+            if (r.ok) archiviate++;
+          }
+        }
+        return res.status(200).json({ ok: true, archiviate, totali });
+      } catch (e) {
+        return res.status(500).json({ error: String(e.message || e) });
+      }
+    }
+
+    // ============================================================
     // ATLAS — ELIMINA CLIENTE
     // ============================================================
     if (body.action === "atlas_delete") {
