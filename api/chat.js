@@ -741,7 +741,7 @@ export default async function handler(req, res) {
           product: {
             title: p.titolo,
             body_html: p.descrizione || "",
-            vendor: p.brand || "X Studio",
+            vendor: p.brand || "CORTEX",
             product_type: p.categoria || "",
             tags: p.tags || "",
             status: p.pubblica ? "active" : "draft",
@@ -778,7 +778,7 @@ export default async function handler(req, res) {
       const to = (body.to || "").toString().trim();
       const subject = (body.subject || "").toString().trim();
       const html = (body.html || "").toString();
-      const from = (body.from || "X Studio <oculus@xstudioportfolio.it>").toString();
+      const from = (body.from || "CORTEX <oculus@xstudioportfolio.it>").toString();
       const replyTo = (body.reply_to || "alessiodifabrizio931@gmail.com").toString();
       if (!to || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to)) {
         return res.status(400).json({ error: "email destinatario non valida" });
