@@ -193,6 +193,47 @@ export default async function handler(
       req.body || {};
 
     // ============================================================
+    // CORTEX — VOCE (ElevenLabs TTS)
+    // ============================================================
+    if (body.action === "tts") {
+      const key = process.env.ELEVENLABS_API_KEY;
+      if (!key) {
+        return res.status(500).json({ error: "ELEVENLABS_API_KEY mancante" });
+      }
+      const text = (body.text || "").toString().trim().slice(0, 800);
+      if (!text) {
+        return res.status(400).json({ error: "text mancante" });
+      }
+      const voiceId = (body.voiceId || "XrExE9yKIg1WjnnlVkGX").toString();
+      try {
+        const r = await fetch(
+          "https://api.elevenlabs.io/v1/text-to-speech/" + encodeURIComponent(voiceId),
+          {
+            method: "POST",
+            headers: {
+              "xi-api-key": key,
+              "Content-Type": "application/json",
+              Accept: "audio/mpeg",
+            },
+            body: JSON.stringify({
+              text,
+              model_id: "eleven_multilingual_v2",
+              voice_settings: { stability: 0.4, similarity_boost: 0.75, style: 0.15, use_speaker_boost: true },
+            }),
+          }
+        );
+        if (!r.ok) {
+          const t = await r.text();
+          return res.status(r.status).json({ error: "Errore ElevenLabs", detail: t.slice(0, 300) });
+        }
+        const buf = Buffer.from(await r.arrayBuffer());
+        return res.status(200).json({ ok: true, audio: buf.toString("base64"), mime: "audio/mpeg" });
+      } catch (e) {
+        return res.status(500).json({ error: String(e.message || e) });
+      }
+    }
+
+    // ============================================================
     // IRIDE — RICERCA FOTO PEXELS
     // ============================================================
 
