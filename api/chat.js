@@ -204,7 +204,12 @@ export default async function handler(
       if (!text) {
         return res.status(400).json({ error: "text mancante" });
       }
-      const voiceId = (body.voiceId || "XrExE9yKIg1WjnnlVkGX").toString();
+      const voiceId = (body.voiceId || "EXAVITQu4vr4xnSDxMaL").toString();
+      const vs = body.voice_settings || {};
+      const stability = typeof vs.stability === "number" ? vs.stability : 0.55;
+      const similarity = typeof vs.similarity_boost === "number" ? vs.similarity_boost : 0.85;
+      const style = typeof vs.style === "number" ? vs.style : 0.25;
+      const speed = typeof body.speed === "number" ? Math.min(Math.max(body.speed, 0.7), 1.2) : 1.0;
       try {
         const r = await fetch(
           "https://api.elevenlabs.io/v1/text-to-speech/" + encodeURIComponent(voiceId),
@@ -218,7 +223,7 @@ export default async function handler(
             body: JSON.stringify({
               text,
               model_id: "eleven_multilingual_v2",
-              voice_settings: { stability: 0.4, similarity_boost: 0.75, style: 0.15, use_speaker_boost: true },
+              voice_settings: { stability, similarity_boost: similarity, style, use_speaker_boost: true, speed },
             }),
           }
         );
