@@ -2394,6 +2394,215 @@ export default async function handler(
     }
 
     // ============================================================
+    // HELIOS — STORE STATUS (reale, onesto)
+    // ============================================================
+    if (body.action === "helios_store_status") {
+      try {
+        const [shopRes, countRes, ordersRes] = await Promise.all([
+          shopifyFetch("/shop.json"),
+          shopifyFetch("/products/count.json"),
+          shopifyFetch("/orders.json?status=any&limit=100&fields=id,financial_status,fulfillment_status,total_price"),
+        ]);
+        const shop = shopRes.shop || {};
+        const orders = ordersRes.orders || [];
+        const paidOrders = orders.filter((o) => (o.financial_status || "") === "paid").length;
+
+        // storefront live/locked: provo a leggere la home dello store
+        let storefront = "UNKNOWN";
+        try {
+          const dom = shop.domain || (process.env.SHOPIFY_STORE + ".myshopify.com");
+          const sr = await fetch("https://" + dom + "/", { redirect: "follow" });
+          const finalUrl = sr.url || "";
+          const html = (await sr.text()).slice(0, 4000).toLowerCase();
+          if (finalUrl.includes("/password") || html.includes('name="password"') || html.includes("opening soon") || html.includes("store is not available")) {
+            storefront = "LOCKED";
+          } else if (sr.ok) {
+            storefront = "LIVE";
+          }
+        } catch {
+          storefront = "UNKNOWN";
+        }
+
+        // pagamenti: non c'è un flag diretto via client_credentials.
+        // segnale onesto: se esistono ordini PAGATI, i pagamenti hanno funzionato almeno una volta.
+        const payments = paidOrders > 0 ? "ACTIVE" : "SETUP_REQUIRED";
+
+        // Collective: disponibile solo US/CA + USD/CAD
+        const country = (shop.country_code || "").toUpperCase();
+        const currency = (shop.currency || "").toUpperCase();
+        const collectiveRegionOk = (country === "US" || country === "CA") && (currency === "USD" || currency === "CAD");
+        const collective = collectiveRegionOk ? "SETUP_REQUIRED" : "NOT_AVAILABLE_REGION";
+
+        return res.status(200).json({
+          ok: true,
+          source: "Shopify",
+          store: {
+            connected: true,
+            name: shop.name || process.env.SHOPIFY_STORE,
+            domain: shop.domain || null,
+            myshopifyDomain: shop.myshopify_domain || null,
+            currency: shop.currency || null,
+            country: shop.country_name || null,
+            countryCode: country || null,
+            plan: shop.plan_display_name || shop.plan_name || null,
+          },
+          products: countRes.count || 0,
+          orders: orders.length,
+          paidOrders,
+          statuses: {
+            api: "CONNECTED",
+            storefront,          // LIVE | LOCKED | UNKNOWN
+            payments,            // ACTIVE | SETUP_REQUIRED
+            collective,          // SETUP_REQUIRED | NOT_AVAILABLE_REGION
+            suppliers: "SETUP_REQUIRED",
+            fulfillment: "NOT_READY",
+          },
+        });
+      } catch (e) {
+        return res.status(500).json({ error: String(e.message || e) });
+      }
+    }
+
+    // ============================================================
+    // HELIOS — STORE READINESS (% prontezza commerciale reale)
+    // ============================================================
+    if (body.action === "helios_store_readiness") {
+      try {
+        const [shopRes, countRes, ordersRes] = await Promise.all([
+          shopifyFetch("/shop.json"),
+          shopifyFetch("/products/count.json"),
+          shopifyFetch("/orders.json?status=any&limit=100&fields=id,financial_status"),
+        ]);
+        const shop = shopRes.shop || {};
+        const orders = ordersRes.orders || [];
+        const paidOrders = orders.filter((o) => (o.financial_status || "") === "paid").length;
+        const productCount = countRes.count || 0;
+
+        let storefront = "UNKNOWN";
+        try {
+          const dom = shop.domain || (process.env.SHOPIFY_STORE + ".myshopify.com");
+          const sr = await fetch("https://" + dom + "/", { redirect: "follow" });
+          const finalUrl = sr.url || "";
+          const html = (await sr.text()).slice(0, 4000).toLowerCase();
+          if (finalUrl.includes("/password") || html.includes('name="password"') || html.includes("opening soon")) storefront = "LOCKED";
+          else if (sr.ok) storefront = "LIVE";
+        } catch { storefront = "UNKNOWN"; }
+
+        const country = (shop.country_code || "").toUpperCase();
+        const currency = (shop.currency || "").toUpperCase();
+        const collectiveRegionOk = (country === "US" || country === "CA") && (currency === "USD" || currency === "CAD");
+
+        // checklist reale, ogni voce pesa
+        const checks = [
+          { key: "api", label: "Shopify API", ok: true, weight: 15 },
+          { key: "products", label: "Prodotti", ok: productCount > 0, weight: 15 },
+          { key: "storefront", label: "Storefront pubblico", ok: storefront === "LIVE", weight: 20 },
+          { key: "payments", label: "Pagamenti attivi", ok: paidOrders > 0, weight: 25 },
+          { key: "suppliers", label: "Rete fornitori", ok: false, weight: 15 },
+          { key: "fulfillment", label: "Fulfillment", ok: false, weight: 10 },
+        ];
+        const total = checks.reduce((s, c) => s + c.weight, 0);
+        const got = checks.reduce((s, c) => s + (c.ok ? c.weight : 0), 0);
+        const readiness = Math.round((got / total) * 100);
+
+        return res.status(200).json({
+          ok: true,
+          readiness,
+          checks: checks.map((c) => ({
+            label: c.label,
+            status: c.ok ? "READY" : (c.key === "storefront" && storefront === "LOCKED" ? "LOCKED"
+              : c.key === "payments" ? "SETUP_REQUIRED"
+              : c.key === "suppliers" ? "SETUP_REQUIRED"
+              : c.key === "fulfillment" ? "NOT_READY"
+              : "NOT_READY"),
+          })),
+          note: collectiveRegionOk ? null : "Shopify Collective non disponibile nella tua region (serve store US/CA in USD/CAD).",
+        });
+      } catch (e) {
+        return res.status(500).json({ error: String(e.message || e) });
+      }
+    }
+
+    // ============================================================
+    // HELIOS — SCORE PRODOTTO (modulare, calcolato in codice)
+    // ============================================================
+    if (body.action === "helios_score_product") {
+      try {
+        const p = body.product || {};
+        const num = (v) => (typeof v === "number" && isFinite(v) ? v : null);
+        const retail = num(p.retailPrice);
+        const cost = num(p.wholesalePrice);
+        const shipping = num(p.shippingCost);
+        const trendPercent = num(p.trendPercent);      // es. +31 => 31
+        const stock = num(p.stock);
+        const deliveryDays = num(p.deliveryDays);
+        const competition = (p.competition || "").toString().toUpperCase(); // LOW/MEDIUM/HIGH
+
+        // economia
+        let totalCost = null, marginEuro = null, marginPercent = null;
+        if (retail != null && cost != null) {
+          totalCost = cost + (shipping != null ? shipping : 0);
+          marginEuro = Math.round((retail - totalCost) * 100) / 100;
+          marginPercent = retail > 0 ? Math.round((marginEuro / retail) * 1000) / 10 : null;
+        }
+
+        // sotto-punteggi modulari 0..1 (null se dato assente)
+        const parts = [];
+        // margine (peso 35)
+        let marginScore = null;
+        if (marginPercent != null) {
+          marginScore = Math.max(0, Math.min(1, marginPercent / 60)); // 60%+ = pieno
+          parts.push({ key: "margin", weight: 35, value: marginScore });
+        }
+        // trend (peso 20)
+        let trendScore = null;
+        if (trendPercent != null) {
+          trendScore = Math.max(0, Math.min(1, (trendPercent + 20) / 80)); // -20%..+60%
+          parts.push({ key: "trend", weight: 20, value: trendScore });
+        }
+        // concorrenza (peso 15)
+        let competitionScore = null;
+        if (competition === "LOW" || competition === "MEDIUM" || competition === "HIGH") {
+          competitionScore = competition === "LOW" ? 1 : competition === "MEDIUM" ? 0.6 : 0.25;
+          parts.push({ key: "competition", weight: 15, value: competitionScore });
+        }
+        // stock (peso 15)
+        let stockScore = null;
+        if (stock != null) {
+          stockScore = stock <= 0 ? 0 : Math.max(0.15, Math.min(1, stock / 200));
+          parts.push({ key: "stock", weight: 15, value: stockScore });
+        }
+        // consegna (peso 15)
+        let deliveryScore = null;
+        if (deliveryDays != null) {
+          deliveryScore = deliveryDays <= 3 ? 1 : deliveryDays <= 7 ? 0.7 : deliveryDays <= 14 ? 0.4 : 0.15;
+          parts.push({ key: "delivery", weight: 15, value: deliveryScore });
+        }
+
+        const wTot = parts.reduce((s, x) => s + x.weight, 0);
+        const wGot = parts.reduce((s, x) => s + x.weight * x.value, 0);
+        const score = wTot > 0 ? Math.round((wGot / wTot) * 100) : null;
+
+        // confidence in base a quanti dati abbiamo (su 5 dimensioni)
+        const coverage = parts.length / 5;
+        const confidence = coverage >= 0.8 ? "HIGH" : coverage >= 0.5 ? "MEDIUM" : "LOW";
+
+        return res.status(200).json({
+          ok: true,
+          economics: { retail, wholesale: cost, shipping, totalCost, marginEuro, marginPercent },
+          subScores: { marginScore, trendScore, competitionScore, stockScore, deliveryScore },
+          heliosScore: score,           // null se non calcolabile
+          confidence,                    // HIGH/MEDIUM/LOW
+          coverage: Math.round(coverage * 100),
+          missing: ["retailPrice","wholesalePrice","shippingCost","trendPercent","competition","stock","deliveryDays"]
+            .filter((k) => body.product?.[k] == null),
+        });
+      } catch (e) {
+        return res.status(500).json({ error: String(e.message || e) });
+      }
+    }
+
+    // ============================================================
     // OCULUS — INVIO EMAIL
     // ============================================================
 
