@@ -162,7 +162,8 @@ async function shopifyFetch(
 // La logica resta in api/chat.js come richiesto.
 // ============================================================
 
-const HELIOS_VERSION = "2.5.1";
+const HELIOS_VERSION = "2.7.0";
+const HELIOS_MAX_COLLECTIVE_SEARCH_ATTEMPTS = 3;
 const HELIOS_COLLECTIVE_TAG = "Shopify Collective";
 const HELIOS_DEFAULT_INITIAL_CAPITAL = 5;
 const HELIOS_AUTO_REINVEST_MAX_PCT = 20;
@@ -303,35 +304,53 @@ function heliosCollectiveSearchPlan(opportunity = {}, attempt = 0) {
       ? opportunity.collectiveSearch
       : {};
 
-  const baseTerms = heliosUniqueStrings(
+  const name = String(opportunity?.name || "trending product").trim();
+  const low = `${name} ${opportunity?.category || ""} ${raw.query || ""}`.toLowerCase();
+
+  // Shopify Collective Discovery is a keyword search, not an AI semantic search.
+  // HELIOS therefore puts short, concrete, retailer-localized queries first.
+  let localized = [];
+  if (/cloth|microfiber|microfibre|cleaning cloth|panno|towel/.test(low)) {
+    localized = ["panno microfibra", "panno pulizia", "panno bambu", "cleaning cloth"];
+  } else if (/sponge|spugna/.test(low)) {
+    localized = ["spugna pulizia", "spugna cucina", "spugna cellulosa", "cleaning sponge"];
+  } else if (/surface cleaner|household cleaner|multi.?surface|deterg|pulizia|home care/.test(low)) {
+    localized = ["detergente superfici", "detergente multiuso", "pulizia superfici", "surface cleaner"];
+  } else if (/storage|organizer|organiser|salvaspazio|cassetti/.test(low)) {
+    localized = ["organizer casa", "organizer cassetti", "contenitore salvaspazio", "storage organizer"];
+  } else if (/travel|viaggio|packing/.test(low)) {
+    localized = ["organizer viaggio", "accessori viaggio", "packing cubes", "travel organizer"];
+  } else if (/pet|dog|cat|cane|gatto/.test(low)) {
+    localized = ["accessori cane", "accessori gatto", "pet accessories", "dog accessories"];
+  } else if (/bottle|borraccia|water bottle/.test(low)) {
+    localized = ["borraccia riutilizzabile", "borraccia termica", "water bottle", "reusable bottle"];
+  } else if (/lamp|light|lighting|lampada/.test(low)) {
+    localized = ["lampada led", "luce led casa", "led lamp", "ambient light"];
+  }
+
+  const rawQueries = heliosUniqueStrings(
     [
+      ...(Array.isArray(raw.localQueries) ? raw.localQueries : []),
+      ...localized,
       raw.query,
       ...(Array.isArray(raw.alternatives) ? raw.alternatives : []),
       ...(Array.isArray(opportunity?.searchTerms) ? opportunity.searchTerms : []),
-      opportunity?.name
+      name
     ],
-    12
+    20
   );
 
-  const fallbackName = String(opportunity?.name || "trending product").trim();
-
-  const queries = baseTerms.length
-    ? baseTerms
-    : [fallbackName];
-
+  const queries = rawQueries.length ? rawQueries : [name];
   const safeAttempt = Math.max(0, Number(attempt) || 0);
+  const boundedAttempt = Math.min(safeAttempt, HELIOS_MAX_COLLECTIVE_SEARCH_ATTEMPTS - 1);
   const activeQuery =
-    queries[Math.min(safeAttempt, queries.length - 1)] ||
+    queries[Math.min(boundedAttempt, queries.length - 1)] ||
     queries[0] ||
-    fallbackName;
+    name;
 
-  const category =
-    String(
-      raw.category ||
-      opportunity?.category ||
-      opportunity?.market ||
-      "General"
-    ).trim();
+  const category = String(
+    raw.category || opportunity?.category || opportunity?.market || "General"
+  ).trim();
 
   const include = heliosUniqueStrings(
     [
@@ -352,12 +371,20 @@ function heliosCollectiveSearchPlan(opportunity = {}, attempt = 0) {
   return {
     query: activeQuery,
     primaryQuery: queries[0] || activeQuery,
-    alternatives: queries.slice(1),
-    allQueries: queries,
+    alternatives: queries.slice(1, HELIOS_MAX_COLLECTIVE_SEARCH_ATTEMPTS),
+    allQueries: queries.slice(0, HELIOS_MAX_COLLECTIVE_SEARCH_ATTEMPTS),
     attempt: safeAttempt,
+    attemptNumber: boundedAttempt + 1,
+    maxAttempts: HELIOS_MAX_COLLECTIVE_SEARCH_ATTEMPTS,
     category,
     include,
-    exclude
+    exclude,
+    filters: {
+      instantImport: true,
+      importMode: "MANUAL",
+      productState: "DRAFT",
+      publish: false
+    }
   };
 }
 
@@ -400,8 +427,8 @@ function heliosCollectiveWaitingCard({
 
   const defaultMessage =
     `HELIOS ha scelto “${intelligence.name}”. ` +
-    `In Shopify Collective cerca esattamente “${plan.query}”. ` +
-    `Se l'Instant Import collega un fornitore e la policy automatica importa più bozze, torna su CORTEX: HELIOS analizzerà tutti i candidati e sceglierà lui quello migliore.`;
+    `In Shopify Collective cerca “${plan.query}” (tentativo ${plan.attemptNumber}/${plan.maxAttempts}), usa Instant Import e la categoria indicata quando disponibile. ` +
+    `NON scegliere tu il prodotto: invia uno screenshot dei risultati nella chat HELIOS. HELIOS confronterà tutti i prodotti visibili e ti dirà esattamente quale importare.`;
 
   return heliosActionCard({
     severity: "ACTION_REQUIRED",
@@ -420,7 +447,9 @@ function heliosCollectiveWaitingCard({
       category: plan.category,
       include: plan.include,
       exclude: plan.exclude,
-      exactSearch: plan.query
+      exactSearch: plan.query,
+      searchAttempt: plan.attemptNumber,
+      maxSearchAttempts: plan.maxAttempts
     },
     actions: [
       {
@@ -434,6 +463,21 @@ function heliosCollectiveWaitingCard({
         label: "OPEN COLLECTIVE",
         type: "LINK",
         url: heliosCollectiveUrl()
+      },
+      {
+        id: "ANALYZE_COLLECTIVE_RESULTS",
+        label: "ANALYZE RESULTS",
+        type: "LOCAL"
+      },
+      {
+        id: "NEXT_SEARCH",
+        label: "NEXT SEARCH",
+        type: "BACKEND"
+      },
+      {
+        id: "NEXT_OPPORTUNITY",
+        label: "NEXT OPPORTUNITY",
+        type: "BACKEND"
       },
       {
         id: "VIEW_OPPORTUNITY",
@@ -944,6 +988,672 @@ async function heliosAIJson(prompt, { temperature = 0.15, maxTokens = 5000 } = {
   };
 }
 
+
+async function heliosAIJsonWithImage(
+  prompt,
+  imageBase64,
+  mediaType = "image/png",
+  { temperature = 0.05, maxTokens = 4500 } = {}
+) {
+  const image = String(imageBase64 || "").replace(/^data:[^;]+;base64,/, "");
+  if (!image) {
+    return { ok: false, provider: null, error: "Immagine Collective mancante" };
+  }
+  if (image.length > 7_000_000) {
+    return { ok: false, provider: null, error: "Screenshot troppo grande: usa un'immagine sotto circa 5 MB." };
+  }
+
+  const geminiKey = process.env.GEMINI_API_KEY;
+  if (geminiKey) {
+    try {
+      const r = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${geminiKey}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [
+              {
+                role: "user",
+                parts: [
+                  { text: prompt },
+                  {
+                    inline_data: {
+                      mime_type: mediaType || "image/png",
+                      data: image
+                    }
+                  }
+                ]
+              }
+            ],
+            generationConfig: {
+              temperature,
+              maxOutputTokens: maxTokens,
+              responseMimeType: "application/json"
+            }
+          })
+        }
+      );
+      const d = await r.json();
+      if (r.ok) {
+        const raw = (d?.candidates?.[0]?.content?.parts || [])
+          .map((x) => x.text || "")
+          .join("")
+          .trim();
+        const parsed = heliosSafeJson(raw);
+        if (parsed) return { ok: true, provider: "gemini", data: parsed };
+      }
+    } catch {}
+  }
+
+  const orKey = process.env.OPENROUTER_API_KEY;
+  if (orKey) {
+    try {
+      const r = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${orKey}`,
+          "HTTP-Referer": process.env.CORTEX_PUBLIC_URL || "https://cortex.local",
+          "X-Title": "CORTEX HELIOS Collective Vision"
+        },
+        body: JSON.stringify({
+          model: process.env.OPENROUTER_VISION_MODEL || process.env.OPENROUTER_MODEL || "openrouter/free",
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "text", text: prompt },
+                {
+                  type: "image_url",
+                  image_url: {
+                    url: `data:${mediaType || "image/png"};base64,${image}`
+                  }
+                }
+              ]
+            }
+          ],
+          temperature,
+          max_tokens: maxTokens,
+          stream: false
+        })
+      });
+      const d = await r.json();
+      if (r.ok) {
+        const raw = d?.choices?.[0]?.message?.content;
+        const text = Array.isArray(raw)
+          ? raw.map((x) => x?.text || x?.content || "").join("")
+          : String(raw || "");
+        const parsed = heliosSafeJson(text);
+        if (parsed) return { ok: true, provider: "openrouter", data: parsed };
+      }
+    } catch {}
+  }
+
+  return {
+    ok: false,
+    provider: null,
+    error: "Nessun provider vision disponibile per analizzare lo screenshot Collective"
+  };
+}
+
+function heliosMissionOpportunityList(mission) {
+  return (Array.isArray(mission?.marketScan?.opportunities)
+    ? mission.marketScan.opportunities
+    : [])
+    .filter(
+      (o) =>
+        Array.isArray(o?.channelFit) &&
+        o.channelFit.includes("SHOPIFY") &&
+        o.risk !== "BLOCKED" &&
+        o.verdict !== "REJECT"
+    );
+}
+
+function heliosOpportunityKey(opportunity) {
+  return String(opportunity?.name || "")
+    .trim()
+    .toLowerCase();
+}
+
+function heliosAdvanceOpportunity(
+  incomingMission,
+  { reason = "COLLECTIVE_COVERAGE_FAILED" } = {}
+) {
+  const mission = JSON.parse(JSON.stringify(incomingMission || {}));
+  mission.pipelines = mission.pipelines || {};
+  const shopPipe = mission.pipelines.SHOPIFY || {};
+  mission.pipelines.SHOPIFY = shopPipe;
+
+  const current = shopPipe.opportunity || null;
+  const currentKey = heliosOpportunityKey(current);
+  const rejected = new Set(
+    (Array.isArray(shopPipe.rejectedOpportunityKeys)
+      ? shopPipe.rejectedOpportunityKeys
+      : [])
+      .map(String)
+      .filter(Boolean)
+  );
+  if (currentKey) rejected.add(currentKey);
+  shopPipe.rejectedOpportunityKeys = [...rejected];
+
+  const candidates = heliosMissionOpportunityList(mission);
+  const next = candidates.find((o) => !rejected.has(heliosOpportunityKey(o))) || null;
+
+  if (!next) {
+    mission.status = "WAITING";
+    mission.checkpoint = "MARKET_RESCAN_REQUIRED";
+    mission.updatedAt = heliosNow();
+    mission.decisionRequired = {
+      type: "OWNER_ACTION",
+      store: "SHOPIFY",
+      reason: "Le opportunità disponibili non hanno trovato copertura sufficiente in Collective."
+    };
+
+    shopPipe.status = "WAITING";
+    shopPipe.step = "MARKET_RESCAN_REQUIRED";
+    shopPipe.reason = reason;
+
+    return {
+      ok: true,
+      mission,
+      rotated: false,
+      exhausted: true,
+      actionCard: heliosActionCard({
+        severity: "ACTION_REQUIRED",
+        title: "COLLECTIVE COVERAGE EXHAUSTED",
+        message:
+          "HELIOS ha esaurito le opportunità Shopify valide della scansione corrente senza trovare copertura Collective sufficiente. Avvia una nuova scansione mercato: non devi scegliere manualmente una nicchia.",
+        reason: "MARKET_RESCAN_REQUIRED",
+        missionId: mission.id,
+        state: "WAITING",
+        actions: [
+          { id: "RETRY_SCAN", label: "NEW MARKET SCAN", type: "BACKEND" },
+          { id: "STOP", label: "TERMINA", type: "BACKEND" }
+        ]
+      })
+    };
+  }
+
+  const previousName = current?.name || null;
+  shopPipe.opportunity = next;
+  shopPipe.collectiveSearchAttempt = 0;
+  shopPipe.autoCandidateRetries = 0;
+  shopPipe.candidateCount = 0;
+  shopPipe.status = "WAITING";
+  shopPipe.step = "WAITING_FOR_COLLECTIVE";
+  shopPipe.progress = 34;
+  shopPipe.reason = "NEW_OPPORTUNITY_SELECTED";
+  delete shopPipe.product;
+  delete shopPipe.match;
+  delete shopPipe.score;
+  delete shopPipe.optimization;
+  delete shopPipe.qualityGate;
+  delete shopPipe.matchDiagnostics;
+
+  mission.status = "WAITING";
+  mission.checkpoint = "WAITING_FOR_COLLECTIVE";
+  mission.progress = Math.max(28, Math.min(42, Number(mission.progress || 28)));
+  mission.updatedAt = heliosNow();
+  mission.decisionRequired = {
+    type: "OWNER_ACTION",
+    store: "SHOPIFY",
+    reason:
+      "Shopify Collective richiede l'apertura della sua UI per visualizzare i risultati Discovery. HELIOS sceglierà il prodotto dopo lo screenshot."
+  };
+  mission.events = [
+    ...(Array.isArray(mission.events) ? mission.events : []),
+    {
+      at: heliosNow(),
+      type: "OPPORTUNITY_ROTATED",
+      from: previousName,
+      to: next.name || null,
+      reason
+    }
+  ];
+
+  return {
+    ok: true,
+    mission,
+    rotated: true,
+    exhausted: false,
+    opportunity: heliosOpportunityIntelligence(next, 0),
+    actionCard: heliosCollectiveWaitingCard({
+      mission,
+      opportunity: next,
+      attempt: 0,
+      title: "NEXT OPPORTUNITY SELECTED",
+      message:
+        `HELIOS ha scartato “${previousName || "l'opportunità precedente"}” per copertura Collective insufficiente e ha scelto autonomamente “${next.name || "la prossima opportunità"}”. ` +
+        `Apri Collective con la query indicata e invia uno screenshot dei risultati: HELIOS selezionerà il prodotto da importare.`,
+      reason: "NEXT_OPPORTUNITY_SELECTED"
+    })
+  };
+}
+
+function heliosMissionNextSearch(incomingMission, reason = "COLLECTIVE_RESULTS_WEAK") {
+  const mission = JSON.parse(JSON.stringify(incomingMission || {}));
+  const shopPipe = mission?.pipelines?.SHOPIFY;
+  if (!shopPipe?.opportunity) {
+    return {
+      ok: false,
+      mission,
+      actionCard: heliosActionCard({
+        severity: "ACTION_REQUIRED",
+        title: "OPPORTUNITY REQUIRED",
+        message: "HELIOS non può generare la ricerca successiva senza un'opportunità Shopify attiva.",
+        reason: "MISSION_OPPORTUNITY_MISSING",
+        missionId: mission?.id || null
+      })
+    };
+  }
+
+  const nextAttempt = Number(shopPipe.collectiveSearchAttempt || 0) + 1;
+  if (nextAttempt >= HELIOS_MAX_COLLECTIVE_SEARCH_ATTEMPTS) {
+    return heliosAdvanceOpportunity(mission, { reason: "COLLECTIVE_SEARCH_LIMIT_REACHED" });
+  }
+
+  shopPipe.collectiveSearchAttempt = nextAttempt;
+  shopPipe.status = "WAITING";
+  shopPipe.step = "WAITING_FOR_COLLECTIVE";
+  shopPipe.reason = reason;
+  mission.status = "WAITING";
+  mission.checkpoint = "WAITING_FOR_COLLECTIVE";
+  mission.updatedAt = heliosNow();
+
+  const plan = heliosCollectiveSearchPlan(shopPipe.opportunity, nextAttempt);
+  mission.events = [
+    ...(Array.isArray(mission.events) ? mission.events : []),
+    {
+      at: heliosNow(),
+      type: "COLLECTIVE_SEARCH_ADVANCED",
+      attempt: nextAttempt,
+      query: plan.query,
+      reason
+    }
+  ];
+
+  return {
+    ok: true,
+    mission,
+    searchAdvanced: true,
+    opportunity: heliosOpportunityIntelligence(shopPipe.opportunity, nextAttempt),
+    actionCard: heliosCollectiveWaitingCard({
+      mission,
+      opportunity: shopPipe.opportunity,
+      attempt: nextAttempt,
+      title: "NEXT COLLECTIVE SEARCH",
+      message:
+        `HELIOS ha scartato i risultati precedenti e passa automaticamente al tentativo ${plan.attemptNumber}/${plan.maxAttempts}. ` +
+        `Cerca “${plan.query}”, applica Instant Import e invia lo screenshot dei risultati. Non scegliere tu il prodotto.`,
+      reason
+    })
+  };
+}
+
+async function heliosAnalyzeCollectiveResultsScreenshot(body = {}) {
+  const incoming = body.mission || null;
+  if (!incoming?.id) {
+    return { ok: false, error: "mission mancante" };
+  }
+
+  const mission = JSON.parse(JSON.stringify(incoming));
+  const shopPipe = mission?.pipelines?.SHOPIFY;
+  const opportunity =
+    shopPipe?.opportunity ||
+    mission?.marketScan?.opportunities?.find?.(
+      (o) => Array.isArray(o?.channelFit) && o.channelFit.includes("SHOPIFY")
+    ) ||
+    null;
+
+  if (!shopPipe || !opportunity) {
+    return {
+      ok: false,
+      mission,
+      actionCard: heliosActionCard({
+        severity: "ACTION_REQUIRED",
+        title: "SHOPIFY OPPORTUNITY REQUIRED",
+        message: "Non c'è una missione Shopify con opportunità attiva da confrontare con lo screenshot.",
+        reason: "MISSION_OPPORTUNITY_MISSING",
+        missionId: mission.id
+      })
+    };
+  }
+
+  const attempt = Number(shopPipe.collectiveSearchAttempt || 0);
+  const plan = heliosCollectiveSearchPlan(opportunity, attempt);
+  const prompt = `
+Sei HELIOS Collective Vision.
+
+Stai guardando UNO SCREENSHOT REALE della pagina Shopify Collective Discovery del proprietario.
+Devi scegliere tu quale prodotto il proprietario deve importare. Il proprietario NON deve fare valutazioni commerciali.
+
+OPPORTUNITA CORRENTE:
+${JSON.stringify(heliosOpportunityIntelligence(opportunity, attempt))}
+
+PIANO DI RICERCA ATTIVO:
+${JSON.stringify(plan)}
+
+REGOLE:
+- Analizza solo prodotti realmente VISIBILI nello screenshot. Non inventare prodotti, prezzi, margini, fornitori o disponibilità.
+- Trascrivi il titolo esattamente per quanto leggibile.
+- Valuta coerenza semantica con l'opportunità, margine visibile, prezzo, Instant Import e rischi evidenti.
+- Un prodotto con keyword simili ma categoria sbagliata deve essere rifiutato.
+- Se il requisito eco/biodegradabile/reusable non è dimostrabile dal titolo/packaging visibile, non inventarlo: abbassa confidence e fit.
+- Preferisci Instant Import quando visibile.
+- Non scegliere un prodotto con fit < 65.
+- Se nessun prodotto è abbastanza coerente, recommendedIndex deve essere null.
+- Restituisci SOLO JSON.
+
+FORMATO:
+{
+  "coverage":"GOOD|MIXED|POOR|EMPTY",
+  "confidence":"HIGH|MEDIUM|LOW",
+  "candidates":[
+    {
+      "index":0,
+      "title":"",
+      "supplier":"",
+      "price":null,
+      "marginPct":null,
+      "instantImport":null,
+      "fit":0,
+      "risk":"LOW|MEDIUM|HIGH|BLOCKED",
+      "why":""
+    }
+  ],
+  "recommendedIndex":null,
+  "reason":""
+}
+`;
+
+  const ai = await heliosAIJsonWithImage(
+    prompt,
+    body.imageBase64 || body.image || "",
+    body.mediaType || body.mime || "image/png",
+    { temperature: 0.02, maxTokens: 5000 }
+  );
+
+  if (!ai.ok) {
+    return {
+      ok: false,
+      mission,
+      actionCard: heliosActionCard({
+        severity: "ACTION_REQUIRED",
+        title: "COLLECTIVE SCREENSHOT ANALYSIS PAUSED",
+        message: "HELIOS non è riuscito ad analizzare lo screenshot. Nessun prodotto è stato selezionato o pubblicato.",
+        reason: ai.error,
+        missionId: mission.id,
+        actions: [
+          { id: "ANALYZE_COLLECTIVE_RESULTS", label: "RETRY SCREENSHOT", type: "LOCAL" },
+          { id: "NEXT_SEARCH", label: "NEXT SEARCH", type: "BACKEND" }
+        ]
+      })
+    };
+  }
+
+  const raw = ai.data || {};
+  const candidates = (Array.isArray(raw.candidates) ? raw.candidates : [])
+    .map((c, i) => ({
+      index: Number.isFinite(Number(c.index)) ? Number(c.index) : i,
+      title: String(c.title || "").slice(0, 220),
+      supplier: String(c.supplier || "").slice(0, 160),
+      price: Number.isFinite(Number(c.price)) ? Number(c.price) : null,
+      marginPct: Number.isFinite(Number(c.marginPct)) ? Number(c.marginPct) : null,
+      instantImport:
+        typeof c.instantImport === "boolean" ? c.instantImport : null,
+      fit: heliosClamp(c.fit),
+      risk: ["LOW", "MEDIUM", "HIGH", "BLOCKED"].includes(String(c.risk).toUpperCase())
+        ? String(c.risk).toUpperCase()
+        : "MEDIUM",
+      why: String(c.why || "").slice(0, 500)
+    }))
+    .filter((c) => c.title);
+
+  const recommendedIndex = Number.isFinite(Number(raw.recommendedIndex))
+    ? Number(raw.recommendedIndex)
+    : null;
+  const recommended =
+    recommendedIndex != null
+      ? candidates.find((c) => c.index === recommendedIndex) || candidates[recommendedIndex] || null
+      : null;
+
+  shopPipe.lastCollectiveScreenshot = {
+    at: heliosNow(),
+    attempt,
+    query: plan.query,
+    coverage: raw.coverage || null,
+    confidence: raw.confidence || null,
+    candidateCount: candidates.length
+  };
+  mission.updatedAt = heliosNow();
+  mission.events = [
+    ...(Array.isArray(mission.events) ? mission.events : []),
+    {
+      at: heliosNow(),
+      type: "COLLECTIVE_SCREENSHOT_ANALYZED",
+      attempt,
+      query: plan.query,
+      coverage: raw.coverage || null,
+      candidateCount: candidates.length,
+      recommended: recommended?.title || null
+    }
+  ];
+
+  if (
+    recommended &&
+    recommended.fit >= 65 &&
+    recommended.risk !== "BLOCKED"
+  ) {
+    shopPipe.status = "WAITING";
+    shopPipe.step = "OWNER_IMPORT_RECOMMENDED_PRODUCT";
+    shopPipe.reason = "COLLECTIVE_UI_IMPORT_REQUIRED";
+    shopPipe.recommendedCollectiveCandidate = recommended;
+    mission.status = "WAITING";
+    mission.checkpoint = "OWNER_IMPORT_RECOMMENDED_PRODUCT";
+    mission.decisionRequired = {
+      type: "OWNER_ACTION",
+      store: "SHOPIFY",
+      reason: "Shopify Collective richiede il click Importazione istantanea nella UI."
+    };
+
+    return {
+      ok: true,
+      mission,
+      provider: ai.provider,
+      analysis: {
+        coverage: raw.coverage || "MIXED",
+        confidence: raw.confidence || "MEDIUM",
+        candidates,
+        recommended
+      },
+      actionCard: heliosActionCard({
+        severity: "ACTION_REQUIRED",
+        title: "IMPORT THIS PRODUCT",
+        message:
+          `HELIOS ha analizzato ${candidates.length} risultati visibili e ha scelto “${recommended.title}”` +
+          `${recommended.supplier ? ` di ${recommended.supplier}` : ""}. ` +
+          `Fit ${Math.round(recommended.fit)}/100${recommended.marginPct != null ? ` · margine visibile ${recommended.marginPct}%` : ""}. ` +
+          `Apri quel risultato e premi Importazione istantanea. Poi torna su CORTEX: HELIOS rileverà la bozza e continuerà da solo.`,
+        reason: "COLLECTIVE_PRODUCT_RECOMMENDED",
+        missionId: mission.id,
+        state: "WAITING",
+        context: {
+          opportunity: heliosOpportunityIntelligence(opportunity, attempt),
+          collectiveSearch: plan,
+          recommendedCandidate: recommended,
+          visibleCandidates: candidates
+        },
+        actions: [
+          { id: "OPEN_COLLECTIVE", label: "OPEN COLLECTIVE", type: "LINK", url: heliosCollectiveUrl() },
+          { id: "ANALYZE_COLLECTIVE_RESULTS", label: "NEW SCREENSHOT", type: "LOCAL" },
+          { id: "NEXT_SEARCH", label: "NEXT SEARCH", type: "BACKEND" },
+          { id: "NEXT_OPPORTUNITY", label: "NEXT OPPORTUNITY", type: "BACKEND" }
+        ]
+      })
+    };
+  }
+
+  const advanced = heliosMissionNextSearch(mission, "NO_VALID_VISIBLE_COLLECTIVE_RESULT");
+  return {
+    ...advanced,
+    provider: ai.provider,
+    analysis: {
+      coverage: raw.coverage || "POOR",
+      confidence: raw.confidence || "MEDIUM",
+      candidates,
+      recommended: null,
+      reason: String(raw.reason || "Nessun risultato visibile supera il fit minimo HELIOS.").slice(0, 600)
+    },
+    autoAdvanced: true
+  };
+}
+
+async function heliosManagedProductVault() {
+  const d = await shopifyGraphQL(`
+    query HeliosManagedProducts {
+      products(first: 100, query: "tag:HELIOS", sortKey: UPDATED_AT, reverse: true) {
+        nodes {
+          id
+          legacyResourceId
+          title
+          handle
+          descriptionHtml
+          vendor
+          productType
+          tags
+          status
+          totalInventory
+          onlineStoreUrl
+          createdAt
+          updatedAt
+          featuredMedia {
+            ... on MediaImage {
+              image { url altText width height }
+            }
+          }
+          variants(first: 20) {
+            nodes {
+              id
+              legacyResourceId
+              title
+              sku
+              price
+              compareAtPrice
+              inventoryQuantity
+            }
+          }
+          managed: metafield(namespace: "helios", key: "managed") { value }
+          scoreMeta: metafield(namespace: "helios", key: "score") { value }
+          growthMeta: metafield(namespace: "helios", key: "growth") { value }
+          marginMeta: metafield(namespace: "helios", key: "margin_pct") { value }
+          missionMeta: metafield(namespace: "helios", key: "mission_id") { value }
+        }
+      }
+    }
+  `);
+
+  return (d?.products?.nodes || []).map((p) => {
+    const v = p?.variants?.nodes?.[0] || {};
+    const image = p?.featuredMedia?.image || null;
+    return {
+      id: p.id,
+      legacyId: p.legacyResourceId || null,
+      title: p.title,
+      handle: p.handle,
+      descriptionHtml: p.descriptionHtml || "",
+      supplier: p.vendor || "Shopify Collective",
+      vendor: p.vendor || null,
+      productType: p.productType || null,
+      tags: p.tags || [],
+      status: p.status || null,
+      inventory: Number(p.totalInventory || 0),
+      price: v.price != null ? Number(v.price) : null,
+      compareAtPrice: v.compareAtPrice != null ? Number(v.compareAtPrice) : null,
+      image: image
+        ? {
+            url: image.url,
+            alt: image.altText || p.title,
+            width: image.width || null,
+            height: image.height || null
+          }
+        : null,
+      storeUrl: p.onlineStoreUrl || null,
+      onlineStoreUrl: p.onlineStoreUrl || null,
+      score: Number.isFinite(Number(p?.scoreMeta?.value)) ? Number(p.scoreMeta.value) : null,
+      growth: Number.isFinite(Number(p?.growthMeta?.value)) ? Number(p.growthMeta.value) : null,
+      margin: Number.isFinite(Number(p?.marginMeta?.value)) ? Number(p.marginMeta.value) : null,
+      missionId: p?.missionMeta?.value || null,
+      managed: p?.managed?.value === "true",
+      createdAt: p.createdAt,
+      updatedAt: p.updatedAt
+    };
+  });
+}
+
+async function heliosProductPerformance() {
+  const [vault, shopRes, ordersRes] = await Promise.all([
+    heliosManagedProductVault(),
+    shopifyFetch("/shop.json"),
+    shopifyFetch(
+      "/orders.json?status=any&limit=250&fields=id,name,currency,financial_status,created_at,line_items"
+    )
+  ]);
+
+  const shop = shopRes?.shop || {};
+  const currency = shop.currency || "EUR";
+  const orders = Array.isArray(ordersRes?.orders) ? ordersRes.orders : [];
+  const byId = new Map(vault.map((p) => [String(p.legacyId || ""), { ...p, unitsSold: 0, grossRevenue: 0, orderIds: new Set() }]));
+
+  for (const order of orders) {
+    for (const li of Array.isArray(order?.line_items) ? order.line_items : []) {
+      const row = byId.get(String(li?.product_id || ""));
+      if (!row) continue;
+      const qty = Number(li?.quantity || 0);
+      const price = Number(li?.price || 0);
+      const discount = Number(li?.total_discount || 0);
+      row.unitsSold += qty;
+      row.grossRevenue += Math.max(0, price * qty - discount);
+      row.orderIds.add(order.id);
+    }
+  }
+
+  const products = [...byId.values()].map((row) => {
+    const revenue = heliosRound(row.grossRevenue || 0) || 0;
+    const ordersCount = row.orderIds.size;
+    const label = row.unitsSold >= 10 || revenue >= 250
+      ? "WINNER"
+      : row.unitsSold > 0
+      ? "SELLING"
+      : "TESTING";
+    const out = {
+      ...row,
+      grossRevenue: revenue,
+      orders: ordersCount,
+      label
+    };
+    delete out.orderIds;
+    return out;
+  });
+
+  return {
+    currency,
+    products,
+    totals: {
+      liveProducts: vault.filter((p) => p.status === "ACTIVE").length,
+      unitsSold: products.reduce((s, p) => s + Number(p.unitsSold || 0), 0),
+      grossRevenue: heliosRound(products.reduce((s, p) => s + Number(p.grossRevenue || 0), 0)) || 0,
+      orders: new Set(
+        orders
+          .filter((o) =>
+            (Array.isArray(o?.line_items) ? o.line_items : []).some((li) => byId.has(String(li?.product_id || "")))
+          )
+          .map((o) => o.id)
+      ).size
+    }
+  };
+}
+
 async function heliosGlobalMarketScan(stores, objective = "") {
   const targets = stores.length ? stores.join(" + ") : "SHOPIFY";
   const baseObjective =
@@ -1003,6 +1713,7 @@ REGOLE:
 - Per ogni opportunità SHOPIFY genera anche un piano di ricerca Collective MOLTO PRECISO:
   - query: una frase breve, concreta e non ambigua, idealmente 2-6 parole;
   - alternatives: query alternative realmente utili;
+  - localQueries: 3 query MOLTO BREVI in italiano (1-4 parole) pensate per il motore keyword di Collective in un negozio italiano;
   - category: categoria commerciale;
   - include: parole/concetti che devono essere coerenti;
   - exclude: parole/concetti che devono essere esclusi per evitare falsi positivi.
@@ -1034,6 +1745,7 @@ FORMATO:
       "collectiveSearch": {
         "query": "",
         "alternatives": [""],
+        "localQueries": [""],
         "category": "",
         "include": [""],
         "exclude": [""]
@@ -1110,6 +1822,12 @@ ${JSON.stringify(sourcePayload).slice(0, 26000)}
                 ...searchTerms.slice(1)
               ],
               8
+            ),
+            localQueries: heliosUniqueStrings(
+              Array.isArray(rawCollective.localQueries)
+                ? rawCollective.localQueries
+                : [],
+              6
             ),
             category:
               String(
@@ -1464,7 +2182,11 @@ async function heliosUpsertCollection(collection, productId, publish = false) {
   return col;
 }
 
-async function heliosApplyCollectiveListing(product, optimization, { publish = false } = {}) {
+async function heliosApplyCollectiveListing(
+  product,
+  optimization,
+  { publish = false, intelligence = {}, missionId = null } = {}
+) {
   const p = optimization.listing;
   const update = await shopifyGraphQL(`
     mutation HeliosProductUpdate($product: ProductUpdateInput!) {
@@ -1498,6 +2220,30 @@ async function heliosApplyCollectiveListing(product, optimization, { publish = f
           key: "last_optimized_at",
           type: "single_line_text_field",
           value: heliosNow()
+        },
+        {
+          namespace: "helios",
+          key: "score",
+          type: "single_line_text_field",
+          value: String(intelligence?.score ?? intelligence?.heliosScore ?? "")
+        },
+        {
+          namespace: "helios",
+          key: "growth",
+          type: "single_line_text_field",
+          value: String(intelligence?.growth ?? intelligence?.growthPotential ?? "")
+        },
+        {
+          namespace: "helios",
+          key: "margin_pct",
+          type: "single_line_text_field",
+          value: String(intelligence?.margin ?? intelligence?.grossMarginPct ?? "")
+        },
+        {
+          namespace: "helios",
+          key: "mission_id",
+          type: "single_line_text_field",
+          value: String(missionId || "")
         }
       ]
     }
@@ -1828,8 +2574,12 @@ async function heliosAnalyzeCollectiveCandidates({
       : []
   );
 
+  const hasCollectiveBaseline = Array.isArray(
+    shopPipe.collectiveSnapshot?.ids
+  );
+
   const baselineIds = new Set(
-    Array.isArray(shopPipe.collectiveSnapshot?.ids)
+    hasCollectiveBaseline
       ? shopPipe.collectiveSnapshot.ids
       : []
   );
@@ -1849,8 +2599,13 @@ async function heliosAnalyzeCollectiveCandidates({
     (p) => p.status === "DRAFT"
   );
 
+  // Se la missione ha catturato un baseline Collective, HELIOS analizza SOLO
+  // prodotti importati dopo quel checkpoint. In questo modo bozze vecchie o
+  // candidati rifiutati da missioni precedenti non contaminano una nuova missione.
   const candidates = newlyImported.length
     ? newlyImported
+    : hasCollectiveBaseline
+    ? []
     : draftCandidates.length
     ? draftCandidates
     : usable;
@@ -1990,6 +2745,13 @@ async function heliosAnalyzeCollectiveCandidates({
     };
 
     const nextAttempt = Number(shopPipe.collectiveSearchAttempt || 0);
+
+    if (nextAttempt >= HELIOS_MAX_COLLECTIVE_SEARCH_ATTEMPTS) {
+      return heliosAdvanceOpportunity(mission, {
+        reason: "COLLECTIVE_CANDIDATE_MATCH_LIMIT_REACHED"
+      });
+    }
+
     const nextPlan = heliosCollectiveSearchPlan(
       opportunity,
       nextAttempt
@@ -2076,6 +2838,8 @@ async function heliosAnalyzeCollectiveCandidates({
     status: product.status,
     inventory: product.inventory,
     image: product.image,
+    descriptionHtml: product.descriptionHtml || "",
+    onlineStoreUrl: product.onlineStoreUrl || null,
     variants: product.variants
   };
 
@@ -2246,6 +3010,12 @@ async function heliosAnalyzeCollectiveCandidates({
         shopPipe.collectiveSearchAttempt || 0
       );
 
+      if (nextAttempt >= HELIOS_MAX_COLLECTIVE_SEARCH_ATTEMPTS) {
+        return heliosAdvanceOpportunity(mission, {
+          reason: "COLLECTIVE_QUALITY_LIMIT_REACHED"
+        });
+      }
+
       return {
         ok: true,
         mission,
@@ -2343,7 +3113,10 @@ async function heliosAnalyzeCollectiveCandidates({
   const shouldAutoPublish =
     autoPublish &&
     mission?.policy?.autoPublishFirstProduct !== false &&
-    !mission?.policy?.firstProductCompleted;
+    (
+      !mission?.policy?.firstProductCompleted ||
+      mission?.policy?.autoPublishNextProductAuthorized === true
+    );
 
   if (shouldAutoPublish) {
     const published =
@@ -2357,7 +3130,8 @@ async function heliosAnalyzeCollectiveCandidates({
     if (published?.ok && published?.mission) {
       published.mission.policy = {
         ...(published.mission.policy || {}),
-        firstProductCompleted: true
+        firstProductCompleted: true,
+        autoPublishNextProductAuthorized: false
       };
 
       published.autoPublished = true;
@@ -2615,68 +3389,52 @@ async function heliosRunMissionStart(body) {
       ids: products.map((p) => p.id).filter(Boolean)
     };
 
-    if (!products.length) {
-      shopPipe.status = "WAITING";
-      shopPipe.step = "WAITING_FOR_COLLECTIVE";
-      shopPipe.progress = 34;
-      shopPipe.reason =
-        "NO_COLLECTIVE_PRODUCTS_IMPORTED";
+    // Ogni nuova missione parte da un baseline dei prodotti Collective già
+    // presenti. HELIOS non riutilizza automaticamente bozze importate da missioni
+    // precedenti: aspetta un nuovo import esplicitamente associato alla ricerca
+    // corrente, così il Product Match è deterministico e idempotente.
+    shopPipe.status = "WAITING";
+    shopPipe.step = "WAITING_FOR_COLLECTIVE";
+    shopPipe.progress = 34;
+    shopPipe.reason = products.length
+      ? "WAITING_FOR_NEW_COLLECTIVE_IMPORT"
+      : "NO_COLLECTIVE_PRODUCTS_IMPORTED";
+    shopPipe.preexistingCollectiveProducts = products.length;
 
-      mission.status = stores.every(
-        (s) =>
-          mission.pipelines[s]?.status ===
-          "WAITING"
-      )
-        ? "WAITING"
-        : "ACTIVE";
+    mission.status = stores.every(
+      (s) => mission.pipelines[s]?.status === "WAITING"
+    )
+      ? "WAITING"
+      : "ACTIVE";
 
-      mission.checkpoint =
-        "WAITING_FOR_COLLECTIVE";
-      mission.updatedAt = heliosNow();
-
-      mission.decisionRequired = {
-        type: "OWNER_ACTION",
-        store: "SHOPIFY",
-        reason:
-          "Shopify Collective non espone API per la ricerca/connessione iniziale del fornitore; l'azione parte dalla UI Collective."
-      };
-
-      return {
-        ok: true,
-        mission,
-        scan,
-        opportunity:
-          heliosOpportunityIntelligence(
-            shopPipe.opportunity,
-            0
-          ),
-        actionCard:
-          heliosCollectiveWaitingCard({
-            mission,
-            opportunity:
-              shopPipe.opportunity,
-            attempt: 0
-          })
-      };
-    }
-
-    const analyzed =
-      await heliosAnalyzeCollectiveCandidates({
-        mission,
-        products,
-        trigger: "MISSION_START",
-        autoPublish: true
-      });
+    mission.checkpoint = "WAITING_FOR_COLLECTIVE";
+    mission.updatedAt = heliosNow();
+    mission.decisionRequired = {
+      type: "OWNER_ACTION",
+      store: "SHOPIFY",
+      reason:
+        "Shopify Collective richiede l'azione iniziale nella UI per importare il prodotto indicato da HELIOS."
+    };
 
     return {
-      ...analyzed,
+      ok: true,
+      mission,
       scan,
+      opportunity: heliosOpportunityIntelligence(
+        shopPipe.opportunity,
+        0
+      ),
+      ignoredPreexistingCollectiveProducts: products.length,
+      actionCard: heliosCollectiveWaitingCard({
+        mission,
+        opportunity: shopPipe.opportunity,
+        attempt: 0
+      }),
       smartLaunch: {
         globalMarket: true,
         selectedStores: stores,
         fullAuto: true,
-        initialCapitalCap:
-          HELIOS_DEFAULT_INITIAL_CAPITAL,
+        initialCapitalCap: HELIOS_DEFAULT_INITIAL_CAPITAL,
         objective: mission.objective
       }
     };
@@ -2978,7 +3736,19 @@ async function heliosPublishMissionProduct(mission, { store = "SHOPIFY" } = {}) 
   }
 
   try {
-    const applied = await heliosApplyCollectiveListing(current, pipe.optimization, { publish: true });
+    const applied = await heliosApplyCollectiveListing(
+      current,
+      pipe.optimization,
+      {
+        publish: true,
+        missionId: mission.id,
+        intelligence: {
+          score: pipe.score?.heliosScore ?? null,
+          growth: pipe.match?.growth ?? pipe.opportunity?.growthPotential ?? null,
+          margin: pipe.score?.economics?.grossMarginPct ?? null
+        }
+      }
+    );
     const collection = await heliosUpsertCollection(pipe.optimization.collection, current.id, true);
 
     const updatedMission = JSON.parse(JSON.stringify(mission));
@@ -3021,6 +3791,12 @@ async function heliosPublishMissionProduct(mission, { store = "SHOPIFY" } = {}) 
         margin: pipe.score?.economics?.grossMarginPct ?? null,
         supplier: current.vendor || current.supplierTag || "Collective",
         url: applied.product?.onlineStoreUrl || current.onlineStoreUrl || null,
+        storeUrl: applied.product?.onlineStoreUrl || current.onlineStoreUrl || null,
+        adminUrl: heliosShopifyAdminUrl(`products/${current.legacyId || ""}`),
+        image: current.image || pipe.product?.image || null,
+        descriptionHtml: pipe.optimization?.listing?.descriptionHtml || current.descriptionHtml || "",
+        price: current.variants?.[0]?.retailPrice ?? null,
+        inventory: current.inventory ?? null,
         actions: [
           { id: "VIEW_PRODUCT", label: "VIEW PRODUCT", type: "LOCAL" },
           { id: "FULL_ANALYSIS", label: "ANALISI COMPLETA", type: "LOCAL" },
@@ -5303,7 +6079,9 @@ export default async function handler(
         "BETTER_COLLECTIVE_MATCH_REQUIRED",
         "BETTER_SUPPLIER_REQUIRED",
         "QUALITY_REJECTED",
-        "PRODUCT_MATCH_RETRY"
+        "PRODUCT_MATCH_RETRY",
+        "OWNER_IMPORT_RECOMMENDED_PRODUCT",
+        "MARKET_RESCAN_REQUIRED"
       ].includes(
         String(
           mission?.checkpoint ||
@@ -5406,6 +6184,107 @@ export default async function handler(
           })
         });
       }
+    }
+
+
+    if (body.action === "helios_collective_results_analyze") {
+      try {
+        const result = await heliosAnalyzeCollectiveResultsScreenshot(body);
+        return res.status(result.ok ? 200 : 409).json(result);
+      } catch (error) {
+        return res.status(500).json({
+          error: String(error?.message || error),
+          actionCard: heliosActionCard({
+            severity: "CRITICAL",
+            title: "COLLECTIVE VISION ERROR",
+            message: "HELIOS non ha selezionato né pubblicato alcun prodotto perché l'analisi dello screenshot non è riuscita.",
+            reason: String(error?.message || error),
+            missionId: body?.mission?.id || null,
+            actions: [
+              { id: "ANALYZE_COLLECTIVE_RESULTS", label: "RETRY SCREENSHOT", type: "LOCAL" },
+              { id: "NEXT_SEARCH", label: "NEXT SEARCH", type: "BACKEND" }
+            ]
+          })
+        });
+      }
+    }
+
+    if (body.action === "helios_mission_next_search") {
+      const mission = body.mission || null;
+      if (!mission?.id) return res.status(400).json({ error: "mission mancante" });
+      try {
+        const result = heliosMissionNextSearch(mission, body.reason || "OWNER_REQUESTED_NEXT_SEARCH");
+        return res.status(result.ok ? 200 : 409).json(result);
+      } catch (error) {
+        return res.status(500).json({ error: String(error?.message || error) });
+      }
+    }
+
+    if (body.action === "helios_mission_next_opportunity") {
+      const mission = body.mission || null;
+      if (!mission?.id) return res.status(400).json({ error: "mission mancante" });
+      try {
+        const result = heliosAdvanceOpportunity(mission, {
+          reason: body.reason || "OWNER_REQUESTED_NEXT_OPPORTUNITY"
+        });
+        return res.status(result.ok ? 200 : 409).json(result);
+      } catch (error) {
+        return res.status(500).json({ error: String(error?.message || error) });
+      }
+    }
+
+    if (body.action === "helios_product_vault") {
+      try {
+        const products = await heliosManagedProductVault();
+        return res.status(200).json({
+          ok: true,
+          source: "Shopify HELIOS managed products",
+          count: products.length,
+          products
+        });
+      } catch (error) {
+        return res.status(500).json({ error: String(error?.message || error) });
+      }
+    }
+
+    if (body.action === "helios_performance") {
+      try {
+        const data = await heliosProductPerformance();
+        return res.status(200).json({ ok: true, ...data });
+      } catch (error) {
+        return res.status(500).json({ error: String(error?.message || error) });
+      }
+    }
+
+    if (body.action === "helios_mission_continue") {
+      const mission = body.mission || null;
+      if (!mission?.id) return res.status(400).json({ error: "mission mancante" });
+      const continued = JSON.parse(JSON.stringify(mission));
+      continued.policy = {
+        ...(continued.policy || {}),
+        autoPublishNextProductAuthorized: true
+      };
+      const result = heliosAdvanceOpportunity(continued, {
+        reason: "OWNER_CONTINUE_AFTER_PRODUCT"
+      });
+      return res.status(result.ok ? 200 : 409).json(result);
+    }
+
+    if (body.action === "helios_mission_stop") {
+      const mission = body.mission || null;
+      if (!mission?.id) return res.status(400).json({ error: "mission mancante" });
+      const stopped = {
+        ...mission,
+        status: "TERMINATED",
+        checkpoint: "OWNER_STOPPED",
+        decisionRequired: null,
+        updatedAt: heliosNow(),
+        events: [
+          ...(Array.isArray(mission.events) ? mission.events : []),
+          { at: heliosNow(), type: "MISSION_TERMINATED_BY_OWNER" }
+        ]
+      };
+      return res.status(200).json({ ok: true, mission: stopped });
     }
 
     if (body.action === "helios_mission_publish") {
