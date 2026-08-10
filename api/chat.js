@@ -162,7 +162,7 @@ async function shopifyFetch(
 // La logica resta in api/chat.js come richiesto.
 // ============================================================
 
-const HELIOS_VERSION = "2.8.1";
+const HELIOS_VERSION = "2.8.2";
 const HELIOS_MAX_COLLECTIVE_SEARCH_ATTEMPTS = 3;
 const HELIOS_COLLECTIVE_TAG = "Shopify Collective";
 const HELIOS_DEFAULT_INITIAL_CAPITAL = 5;
@@ -2454,6 +2454,157 @@ Restituisci solo JSON:
   };
 }
 
+
+function heliosCatalogLaunchScore(product) {
+  const v = product?.variants?.[0] || {};
+  const retail = Number(v.retailPrice || 0);
+  const cost = v.supplierCost != null ? Number(v.supplierCost) : null;
+  const inventory = Number(product?.inventory || v.inventory || 0);
+  const marginPct =
+    Number.isFinite(Number(v.grossMarginPct))
+      ? Number(v.grossMarginPct)
+      : cost != null && retail > 0
+      ? ((retail - cost) / retail) * 100
+      : null;
+
+  const marginValue =
+    marginPct == null ? 35 :
+    marginPct >= 40 ? 100 :
+    marginPct >= 30 ? 92 :
+    marginPct >= 25 ? 86 :
+    marginPct >= 20 ? 78 :
+    marginPct >= 15 ? 66 :
+    marginPct >= 10 ? 48 : 25;
+
+  const inventoryValue =
+    inventory >= 50 ? 100 :
+    inventory >= 20 ? 94 :
+    inventory >= 10 ? 86 :
+    inventory >= 5 ? 76 :
+    inventory >= 1 ? 62 : 0;
+
+  const completenessParts = [
+    Boolean(product?.title),
+    Boolean(product?.descriptionHtml),
+    Boolean(product?.image?.url),
+    Boolean(product?.vendor || product?.supplierTag),
+    retail > 0
+  ];
+  const completeness = Math.round(
+    (completenessParts.filter(Boolean).length / completenessParts.length) * 100
+  );
+
+  // Catalog Launch non deve fingere una domanda di mercato che non abbiamo misurato.
+  // Preferisce prodotti semplici da vendere e penalizza soltanto categorie che meritano
+  // una verifica Commerce Shield più severa; la decisione finale resta al gate AI.
+  const riskyText = `${product?.title || ''} ${product?.productType || ''}`.toLowerCase();
+  const regulatedRiskHint = /(acido|percarbonato|candeggina|bleach|disinfett|alcol|solvente|pestic|biocid|chemical|chimic)/i.test(riskyText);
+  const simplicityValue = regulatedRiskHint ? 55 : 92;
+  const supplierValue = heliosIsCollectiveProduct(product) && (product?.vendor || product?.supplierTag) ? 100 : 40;
+
+  const score =
+    marginValue * 0.34 +
+    inventoryValue * 0.20 +
+    completeness * 0.20 +
+    supplierValue * 0.16 +
+    simplicityValue * 0.10;
+
+  const hardGates = {
+    collectiveManaged: heliosIsCollectiveProduct(product),
+    inventoryAvailable: inventory > 0,
+    hasSellPrice: retail > 0,
+    notArchived: product?.status !== 'ARCHIVED',
+    supplierLinked: Boolean(product?.vendor || product?.supplierTag)
+  };
+
+  return {
+    heliosScore: Math.round(score),
+    confidence: cost != null ? 'HIGH' : 'MEDIUM',
+    coverage: Math.round((completeness + (cost != null ? 100 : 55)) / 2),
+    fit: null,
+    mode: 'CATALOG_LAUNCH',
+    hardGates,
+    criticalPass: Object.values(hardGates).every(Boolean),
+    economics: {
+      retailPrice: retail || null,
+      supplierCost: cost,
+      shippingCost: null,
+      shippingStatus: 'COLLECTIVE_RATE_AT_CHECKOUT',
+      grossMarginEuro: cost != null ? heliosRound(retail - cost) : null,
+      grossMarginPct: marginPct != null ? heliosRound(marginPct, 1) : null,
+      note: 'Catalog Launch usa solo dati Shopify/Collective disponibili; nessuna domanda di mercato viene inventata.'
+    },
+    market: {
+      fit: null,
+      demand: null,
+      growth: null,
+      breakout: null,
+      saturation: null
+    },
+    diagnostics: {
+      marginValue,
+      inventoryValue,
+      completeness,
+      simplicityValue,
+      regulatedRiskHint
+    }
+  };
+}
+
+function heliosCatalogLaunchQualityGate({ product, score, optimization }) {
+  const hard = {
+    collectiveManaged: heliosIsCollectiveProduct(product),
+    supplierLinked: Boolean(product?.vendor || product?.supplierTag),
+    inventory: Number(product?.inventory || 0) > 0,
+    validPrice: Number(product?.variants?.[0]?.retailPrice || 0) > 0,
+    commerceShield: optimization?.commerceShield?.risk !== 'BLOCKED',
+    completeListing: Boolean(optimization?.listing?.title && optimization?.listing?.descriptionHtml)
+  };
+
+  const q = optimization?.quality || {};
+  const weighted = [
+    [q.content, 0.22],
+    [q.visual, 0.08],
+    [q.usability, 0.14],
+    [q.perceivedValue, 0.14],
+    [q.listing, 0.26],
+    [q.seo, 0.16]
+  ].filter(([value]) => Number.isFinite(Number(value)));
+  const weightTotal = weighted.reduce((sum, [, weight]) => sum + weight, 0);
+  const qualityAverage = weightTotal
+    ? weighted.reduce((sum, [value, weight]) => sum + Number(value) * weight, 0) / weightTotal
+    : 0;
+
+  const commercial = Number(score?.heliosScore || 0);
+  const margin = Number(score?.economics?.grossMarginPct ?? 0);
+  const risk = String(optimization?.commerceShield?.risk || 'MEDIUM').toUpperCase();
+  const hardPass = Object.values(hard).every(Boolean);
+  const marginPass = Number.isFinite(margin) && margin >= 15;
+  const commercialPass = commercial >= 58 && marginPass;
+  const pass = hardPass && qualityAverage >= 60 && commercialPass && risk !== 'HIGH';
+
+  return {
+    pass,
+    hardPass,
+    hardGates: hard,
+    qualityAverage: Math.round(qualityAverage),
+    commercialScore: commercial,
+    fit: null,
+    marginPct: Number.isFinite(margin) ? heliosRound(margin, 1) : null,
+    confidence: score?.confidence || 'LOW',
+    risk,
+    mode: 'CATALOG_LAUNCH',
+    status: pass ? 'PASS' : hardPass ? 'REJECTED' : 'BLOCKED',
+    reasons: [
+      ...Object.entries(hard).filter(([,value]) => !value).map(([key]) => key),
+      ...(marginPass ? [] : ['margin_below_15_pct']),
+      ...(qualityAverage >= 60 ? [] : ['listing_quality_below_60']),
+      ...(commercial >= 58 ? [] : ['catalog_commercial_score_below_58']),
+      ...(risk === 'HIGH' ? ['commerce_shield_high_risk'] : [])
+    ]
+  };
+}
+
 function heliosQualityGate({ product, score, optimization }) {
   const hard = {
     collectiveManaged: heliosIsCollectiveProduct(product),
@@ -4152,40 +4303,16 @@ async function heliosEvaluateImportedCatalog(body = {}) {
   mission.pipelines = mission.pipelines || {};
   mission.pipelines.SHOPIFY = mission.pipelines.SHOPIFY || {
     status: "ACTIVE",
-    step: "CATALOG_REEVALUATION",
+    step: "CATALOG_LAUNCH",
     progress: 42,
     collectiveSearchAttempt: 0,
     rejectedProductIds: []
   };
 
   const shopPipe = mission.pipelines.SHOPIFY;
-  const opportunity =
-    shopPipe.opportunity ||
-    mission?.marketScan?.opportunities?.find?.(
-      (o) => Array.isArray(o?.channelFit) && o.channelFit.includes("SHOPIFY")
-    ) ||
-    mission?.marketScan?.opportunities?.[0] ||
-    null;
-
-  if (!opportunity) {
-    return {
-      ok: false,
-      mission,
-      actionCard: heliosActionCard({
-        severity: "ACTION_REQUIRED",
-        title: "OPPORTUNITY REQUIRED",
-        message: "HELIOS non può rivalutare il catalogo senza un'opportunità Shopify attiva.",
-        reason: "MISSION_OPPORTUNITY_MISSING",
-        missionId: mission.id,
-        actions: [{ id: "RETRY_SCAN", label: "NEW MARKET SCAN", type: "BACKEND" }]
-      })
-    };
-  }
-
   const products = await heliosCollectiveProducts({
     limit: body?.limit || 200
   });
-
   const imported = products.filter(
     (p) => p?.id && p.status !== "ARCHIVED"
   );
@@ -4204,63 +4331,261 @@ async function heliosEvaluateImportedCatalog(body = {}) {
     };
   }
 
-  // Explicit owner request: re-open every imported candidate for evaluation,
-  // but do NOT start another Discovery search until this catalog pass finishes.
-  shopPipe.opportunity = opportunity;
+  // v2.8.2 — CATALOG LAUNCH MODE
+  // Questa azione esplicita NON valuta i prodotti contro la nicchia/opportunità
+  // corrente. Valuta invece ogni import già presente sulla sua idoneità intrinseca
+  // a essere venduto: economia reale, stock, fornitore, Commerce Shield, qualità
+  // listing e integrità Shopify. È il comportamento richiesto da EVALUATE & PUBLISH.
+  shopPipe.status = "ACTIVE";
+  shopPipe.step = "CATALOG_LAUNCH_EVALUATION";
+  shopPipe.progress = Math.max(Number(shopPipe.progress || 0), 48);
+  shopPipe.reason = null;
+  shopPipe.catalogLaunchMode = true;
   shopPipe.expectedImport = null;
   shopPipe.recommendedCollectiveCandidate = null;
   shopPipe.expectedImportDetected = null;
-  shopPipe.rejectedProductIds = [];
   shopPipe.autoCandidateRetries = 0;
-  shopPipe.collectiveSearchAttempt = 0;
   shopPipe.qualityRepairAttempts = 0;
-  shopPipe.collectiveSnapshot = {
-    capturedAt: heliosNow(),
-    ids: []
-  };
-  shopPipe.status = "ACTIVE";
-  shopPipe.step = "EVALUATING_IMPORTED_CATALOG";
-  shopPipe.progress = Math.max(Number(shopPipe.progress || 0), 42);
-  shopPipe.reason = null;
 
   mission.status = "ACTIVE";
-  mission.checkpoint = "EVALUATING_IMPORTED_CATALOG";
-  mission.progress = Math.max(Number(mission.progress || 0), 42);
+  mission.checkpoint = "CATALOG_LAUNCH_EVALUATION";
+  mission.progress = Math.max(Number(mission.progress || 0), 48);
   mission.decisionRequired = null;
   mission.updatedAt = heliosNow();
   mission.events = [
     ...(Array.isArray(mission.events) ? mission.events : []),
     {
       at: heliosNow(),
-      type: "IMPORTED_CATALOG_REEVALUATION_STARTED",
+      type: "CATALOG_LAUNCH_EVALUATION_STARTED",
       productCount: imported.length
     }
   ];
 
-  const result = await heliosAnalyzeCollectiveCandidates({
-    mission,
-    products: imported,
-    trigger: "OWNER_CATALOG_REEVALUATION",
-    autoPublish: true
+  // Pre-ranking deterministico: riduce costi AI e dà precedenza ai candidati con
+  // economia/stock/listing più solidi. I prodotti chimici non vengono bloccati qui:
+  // ricevono solo una penalizzazione prudenziale e passano comunque dal Commerce Shield.
+  const ranked = imported
+    .map((product) => ({ product, score: heliosCatalogLaunchScore(product) }))
+    .sort((a, b) => Number(b.score?.heliosScore || 0) - Number(a.score?.heliosScore || 0));
+
+  const evaluations = [];
+  const passing = [];
+
+  for (const item of ranked) {
+    const product = item.product;
+    const score = item.score;
+    const context = {
+      name: product?.productType || product?.title || "Catalog Product",
+      category: product?.productType || null,
+      mode: "CATALOG_LAUNCH",
+      objective: "Valuta e ottimizza questo prodotto già importato per uno store multi-nicchia, senza inventare segnali di mercato."
+    };
+
+    let optimization = await heliosOptimizeCollectiveListing(
+      product,
+      context,
+      { catalogLaunch: true }
+    );
+
+    if (!optimization?.ok) {
+      evaluations.push({
+        productId: product.id,
+        title: product.title,
+        vendor: product.vendor || null,
+        status: "REJECTED",
+        heliosScore: score.heliosScore,
+        marginPct: score.economics?.grossMarginPct ?? null,
+        inventory: product.inventory ?? null,
+        risk: "UNKNOWN",
+        reason: `LISTING_INTELLIGENCE_FAILED: ${optimization?.error || "AI unavailable"}`
+      });
+      continue;
+    }
+
+    let gate = heliosCatalogLaunchQualityGate({ product, score, optimization });
+    let repairAttempts = 0;
+
+    while (
+      !gate.pass &&
+      gate.hardPass &&
+      optimization?.commerceShield?.risk !== "HIGH" &&
+      optimization?.commerceShield?.risk !== "BLOCKED" &&
+      repairAttempts < 2
+    ) {
+      repairAttempts += 1;
+      const repaired = await heliosOptimizeCollectiveListing(
+        product,
+        context,
+        {
+          catalogLaunch: true,
+          repairContext: {
+            attempt: repairAttempts,
+            gate,
+            quality: optimization?.quality || null
+          }
+        }
+      );
+      if (!repaired?.ok) break;
+      optimization = repaired;
+      gate = heliosCatalogLaunchQualityGate({ product, score, optimization });
+    }
+
+    const evaluation = {
+      productId: product.id,
+      title: product.title,
+      vendor: product.vendor || null,
+      status: gate.pass ? "PASS" : "REJECTED",
+      heliosScore: score.heliosScore,
+      marginPct: score.economics?.grossMarginPct ?? null,
+      inventory: product.inventory ?? null,
+      quality: gate.qualityAverage,
+      risk: gate.risk,
+      reasons: gate.reasons || [],
+      repairAttempts
+    };
+    evaluations.push(evaluation);
+
+    if (gate.pass) {
+      passing.push({ product, score, optimization, gate, evaluation });
+    }
+  }
+
+  shopPipe.catalogEvaluations = evaluations;
+  shopPipe.rejectedProductIds = evaluations
+    .filter((x) => x.status !== "PASS")
+    .map((x) => x.productId)
+    .filter(Boolean);
+  mission.updatedAt = heliosNow();
+
+  if (!passing.length) {
+    shopPipe.status = "WAITING";
+    shopPipe.step = "CATALOG_NO_ELIGIBLE_PRODUCT";
+    shopPipe.progress = 68;
+    shopPipe.reason = "NO_IMPORTED_PRODUCT_PASSED_CATALOG_LAUNCH";
+
+    mission.status = "WAITING";
+    mission.checkpoint = "CATALOG_NO_ELIGIBLE_PRODUCT";
+    mission.progress = Math.max(Number(mission.progress || 0), 68);
+    mission.decisionRequired = {
+      type: "CATALOG_REVIEW",
+      store: "SHOPIFY",
+      reason: "Nessun prodotto importato ha superato tutti i gate Catalog Launch."
+    };
+    mission.events.push({
+      at: heliosNow(),
+      type: "CATALOG_LAUNCH_EVALUATION_COMPLETED",
+      productCount: imported.length,
+      eligibleCount: 0
+    });
+
+    const summary = evaluations
+      .map((x) => `${x.title}: ${x.status} · Score ${x.heliosScore} · Margin ${x.marginPct ?? "?"}% · Risk ${x.risk}${x.reasons?.length ? ` · ${x.reasons.join(", ")}` : ""}`)
+      .join(" | ")
+      .slice(0, 4000);
+
+    return {
+      ok: true,
+      mission,
+      catalogEvaluation: true,
+      catalogLaunchMode: true,
+      evaluatedProductCount: imported.length,
+      catalogEvaluations: evaluations,
+      actionCard: heliosActionCard({
+        severity: "ACTION_REQUIRED",
+        title: "NO IMPORTED PRODUCT IS READY TO SELL",
+        message:
+          `HELIOS ha completato il Catalog Launch su ${imported.length} prodotti già importati. Nessuno ha superato TUTTI i gate, quindi nessuno è stato messo online. ${summary}`,
+        reason: "NO_IMPORTED_PRODUCT_PASSED_CATALOG_LAUNCH",
+        missionId: mission.id,
+        state: "WAITING",
+        completed: ["CATALOG READ", "ECONOMICS", "COMMERCE SHIELD", "LISTING QUALITY", "QUALITY GATE"],
+        pending: ["NEW ELIGIBLE PRODUCT"],
+        context: { evaluations },
+        actions: [
+          { id: "VIEW_PRODUCTS", label: "VIEW PRODUCTS", type: "LOCAL" },
+          { id: "RETRY_SCAN", label: "NEW MARKET SCAN", type: "BACKEND" }
+        ]
+      })
+    };
+  }
+
+  // Pubblica il migliore idoneo. Gli altri PASS restano pronti ma il checkpoint
+  // dopo il primo prodotto rimane rispettato: nessuna pubblicazione multipla incontrollata.
+  passing.sort((a, b) => {
+    const aValue = Number(a.score.heliosScore || 0) * 0.7 + Number(a.gate.qualityAverage || 0) * 0.3;
+    const bValue = Number(b.score.heliosScore || 0) * 0.7 + Number(b.gate.qualityAverage || 0) * 0.3;
+    return bValue - aValue;
+  });
+  const winner = passing[0];
+
+  shopPipe.product = {
+    id: winner.product.id,
+    legacyId: winner.product.legacyId,
+    title: winner.product.title,
+    vendor: winner.product.vendor,
+    status: winner.product.status,
+    inventory: winner.product.inventory,
+    image: winner.product.image,
+    descriptionHtml: winner.product.descriptionHtml || "",
+    onlineStoreUrl: winner.product.onlineStoreUrl || null,
+    variants: winner.product.variants
+  };
+  shopPipe.score = winner.score;
+  shopPipe.match = {
+    fit: null,
+    growth: null,
+    breakout: null,
+    saturation: null,
+    demand: null,
+    reason: "CATALOG_LAUNCH_INTRINSIC_ELIGIBILITY"
+  };
+  shopPipe.optimization = winner.optimization;
+  shopPipe.qualityGate = winner.gate;
+  shopPipe.status = "READY_TO_PUBLISH";
+  shopPipe.step = "CATALOG_LAUNCH_READY_TO_PUBLISH";
+  shopPipe.progress = 82;
+  shopPipe.reason = null;
+
+  mission.status = "ACTIVE";
+  mission.checkpoint = "CATALOG_LAUNCH_READY_TO_PUBLISH";
+  mission.progress = Math.max(Number(mission.progress || 0), 82);
+  mission.decisionRequired = null;
+  mission.updatedAt = heliosNow();
+  mission.events.push({
+    at: heliosNow(),
+    type: "CATALOG_LAUNCH_WINNER_SELECTED",
+    productId: winner.product.id,
+    title: winner.product.title,
+    heliosScore: winner.score.heliosScore,
+    marginPct: winner.score.economics?.grossMarginPct ?? null,
+    quality: winner.gate.qualityAverage,
+    eligibleCount: passing.length
   });
 
-  if (result?.mission) {
-    result.mission.events = [
-      ...(Array.isArray(result.mission.events) ? result.mission.events : []),
+  const published = await heliosPublishMissionProduct(mission, { store: "SHOPIFY" });
+  if (published?.mission) {
+    published.mission.pipelines.SHOPIFY.catalogEvaluations = evaluations;
+    published.mission.pipelines.SHOPIFY.catalogLaunchMode = true;
+    published.mission.events = [
+      ...(published.mission.events || []),
       {
         at: heliosNow(),
-        type: "IMPORTED_CATALOG_REEVALUATION_COMPLETED",
+        type: "CATALOG_LAUNCH_EVALUATION_COMPLETED",
         productCount: imported.length,
-        published:
-          result?.mission?.pipelines?.SHOPIFY?.status === "LIVE"
+        eligibleCount: passing.length,
+        publishedProductId: winner.product.id
       }
     ];
   }
 
   return {
-    ...result,
+    ...published,
     catalogEvaluation: true,
-    evaluatedProductCount: imported.length
+    catalogLaunchMode: true,
+    evaluatedProductCount: imported.length,
+    catalogEvaluations: evaluations,
+    eligibleProductCount: passing.length,
+    selectedCatalogProduct: winner.evaluation
   };
 }
 
