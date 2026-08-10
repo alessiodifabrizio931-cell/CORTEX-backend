@@ -162,7 +162,7 @@ async function shopifyFetch(
 // La logica resta in api/chat.js come richiesto.
 // ============================================================
 
-const HELIOS_VERSION = "2.7.1";
+const HELIOS_VERSION = "2.8.0";
 const HELIOS_MAX_COLLECTIVE_SEARCH_ATTEMPTS = 3;
 const HELIOS_COLLECTIVE_TAG = "Shopify Collective";
 const HELIOS_DEFAULT_INITIAL_CAPITAL = 5;
@@ -855,25 +855,32 @@ function heliosPhysicalScore(product, market = {}) {
   const retail = Number(v.retailPrice || 0);
   const cost = v.supplierCost != null ? Number(v.supplierCost) : null;
   const inventory = Number(product?.inventory || v.inventory || 0);
+  const fit = heliosClamp(market?.fit ?? 50);
   const growth = heliosClamp(market?.growth ?? market?.growthPotential ?? 50);
   const breakout = heliosClamp(market?.breakout ?? market?.breakoutConfidence ?? 50);
   const demand = heliosClamp(market?.demand ?? market?.currentDemand ?? 50);
   const saturation = heliosClamp(market?.saturation ?? market?.marketSaturation ?? 50);
 
+  // v2.8: il fit reale col prodotto pesa esplicitamente. Nelle versioni precedenti
+  // un candidato scelto a 90-95/100 dalla Vision poteva essere bocciato perché
+  // il punteggio commerciale ignorava completamente il fit e sovrappesava i
+  // segnali di mercato stimati.
+  parts.push({ key: "fit", weight: 30, value: fit });
+
   if (retail > 0 && cost != null) {
     const marginPct = ((retail - cost) / retail) * 100;
-    parts.push({ key: "margin", weight: 25, value: heliosClamp((marginPct / 55) * 100) });
+    parts.push({ key: "margin", weight: 20, value: heliosClamp((marginPct / 45) * 100) });
   }
 
-  parts.push({ key: "inventory", weight: 15, value: heliosClamp((inventory / 150) * 100) });
-  parts.push({ key: "demand", weight: 20, value: demand });
-  parts.push({ key: "growth", weight: 20, value: growth });
-  parts.push({ key: "breakout", weight: 10, value: breakout });
+  parts.push({ key: "inventory", weight: 10, value: heliosClamp((inventory / 80) * 100) });
+  parts.push({ key: "demand", weight: 15, value: demand });
+  parts.push({ key: "growth", weight: 10, value: growth });
+  parts.push({ key: "breakout", weight: 5, value: breakout });
   parts.push({ key: "low_saturation", weight: 10, value: 100 - saturation });
 
-  const totalWeight = parts.reduce((s, x) => s + x.weight, 0);
+  const totalWeight = parts.reduce((sum, x) => sum + x.weight, 0);
   const score = totalWeight
-    ? parts.reduce((s, x) => s + x.value * x.weight, 0) / totalWeight
+    ? parts.reduce((sum, x) => sum + x.value * x.weight, 0) / totalWeight
     : 0;
 
   const hardGates = {
@@ -889,6 +896,7 @@ function heliosPhysicalScore(product, market = {}) {
     retail > 0,
     cost != null,
     inventory >= 0,
+    market?.fit != null,
     market?.growth != null || market?.growthPotential != null,
     market?.demand != null || market?.currentDemand != null,
     market?.saturation != null || market?.marketSaturation != null
@@ -899,6 +907,7 @@ function heliosPhysicalScore(product, market = {}) {
     heliosScore: Math.round(score),
     confidence: coverage >= 80 ? "HIGH" : coverage >= 55 ? "MEDIUM" : "LOW",
     coverage,
+    fit,
     hardGates,
     criticalPass,
     economics: {
@@ -910,12 +919,7 @@ function heliosPhysicalScore(product, market = {}) {
       grossMarginPct: cost != null && retail > 0 ? heliosRound(((retail - cost) / retail) * 100, 1) : null,
       note: "La spedizione Collective può dipendere dalla tariffa del fornitore e viene validata nel flusso checkout; se non esposta via API resta un dato a confidenza ridotta."
     },
-    market: {
-      demand,
-      growth,
-      breakout,
-      saturation
-    }
+    market: { demand, growth, breakout, saturation, fit }
   };
 }
 
@@ -1397,6 +1401,59 @@ function heliosOpportunityKey(opportunity) {
     .toLowerCase();
 }
 
+function heliosOpportunityFamily(opportunity) {
+  const text = `${opportunity?.name || ""} ${opportunity?.category || ""} ${opportunity?.market || ""}`
+    .toLowerCase();
+  if (/clean|deterg|pulizi|spugn|microfibr|laundry|lavagg|household cleaner|surface cleaner/.test(text)) return "CLEANING";
+  if (/beauty|cosmetic|skin|hair|makeup|profum|shampoo|conditioner/.test(text)) return "BEAUTY";
+  if (/pet|dog|cat|animali|cane|gatto/.test(text)) return "PET";
+  if (/travel|viagg|luggage|bag|organizer|packing/.test(text)) return "TRAVEL";
+  if (/kitchen|cucina|food storage|bottle|utensil|cook/.test(text)) return "KITCHEN";
+  if (/tech|electronic|charger|cable|phone|computer|smart/.test(text)) return "TECH";
+  if (/fitness|sport|wellness|yoga|recovery/.test(text)) return "FITNESS_WELLNESS";
+  if (/home|casa|decor|storage|organizer|lighting/.test(text)) return "HOME";
+  if (/accessor|wallet|jewel|watch|fashion|apparel|shoe/.test(text)) return "ACCESSORIES";
+  if (/hobby|craft|garden|outdoor|camp/.test(text)) return "HOBBY_OUTDOOR";
+  return String(opportunity?.category || opportunity?.name || "OTHER")
+    .trim().toUpperCase().replace(/[^A-Z0-9]+/g, "_").slice(0, 48) || "OTHER";
+}
+
+function heliosNormalizeMatchText(value) {
+  return String(value || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function heliosRecommendationMatchScore(product, recommendation) {
+  if (!product || !recommendation) return 0;
+  const pTitle = heliosNormalizeMatchText(product.title);
+  const rTitle = heliosNormalizeMatchText(recommendation.title);
+  const pSupplier = heliosNormalizeMatchText(product.vendor || product.supplierTag);
+  const rSupplier = heliosNormalizeMatchText(recommendation.supplier);
+  const rTokens = new Set(rTitle.split(/\s+/).filter((x) => x.length >= 3));
+  const pTokens = new Set(pTitle.split(/\s+/).filter((x) => x.length >= 3));
+  const overlap = [...rTokens].filter((x) => pTokens.has(x)).length;
+  const titleCoverage = rTokens.size ? overlap / rTokens.size : 0;
+  let score = titleCoverage * 75;
+  if (pTitle && rTitle && (pTitle.includes(rTitle) || rTitle.includes(pTitle))) score = Math.max(score, 88);
+  if (rSupplier && pSupplier && (pSupplier.includes(rSupplier) || rSupplier.includes(pSupplier))) score += 20;
+  const recPrice = Number(recommendation.price);
+  const actualPrice = Number(product?.variants?.[0]?.retailPrice);
+  if (Number.isFinite(recPrice) && recPrice > 0 && Number.isFinite(actualPrice) && Math.abs(actualPrice - recPrice) <= Math.max(0.5, recPrice * 0.08)) score += 5;
+  return heliosClamp(score);
+}
+
+function heliosFindExpectedImportedProduct(products, recommendation) {
+  if (!recommendation || !Array.isArray(products) || !products.length) return null;
+  const ranked = products
+    .map((product) => ({ product, score: heliosRecommendationMatchScore(product, recommendation) }))
+    .sort((a, b) => b.score - a.score);
+  return ranked[0]?.score >= 58 ? ranked[0] : null;
+}
+
 function heliosAdvanceOpportunity(
   incomingMission,
   { reason = "COLLECTIVE_COVERAGE_FAILED" } = {}
@@ -1417,6 +1474,12 @@ function heliosAdvanceOpportunity(
   );
   if (currentKey) rejected.add(currentKey);
   shopPipe.rejectedOpportunityKeys = [...rejected];
+  const cooldownFamilies = new Set(
+    (Array.isArray(mission.marketCooldownFamilies) ? mission.marketCooldownFamilies : [])
+      .map((x) => String(x || "").toUpperCase())
+  );
+  if (current) cooldownFamilies.add(heliosOpportunityFamily(current));
+  mission.marketCooldownFamilies = [...cooldownFamilies];
 
   const candidates = heliosMissionOpportunityList(mission);
   const next = candidates.find((o) => !rejected.has(heliosOpportunityKey(o))) || null;
@@ -1471,6 +1534,9 @@ function heliosAdvanceOpportunity(
   delete shopPipe.optimization;
   delete shopPipe.qualityGate;
   delete shopPipe.matchDiagnostics;
+  delete shopPipe.expectedImport;
+  delete shopPipe.expectedImportDetected;
+  delete shopPipe.recommendedCollectiveCandidate;
 
   mission.status = "WAITING";
   mission.checkpoint = "WAITING_FOR_COLLECTIVE";
@@ -1730,6 +1796,12 @@ FORMATO:
     shopPipe.step = "OWNER_IMPORT_RECOMMENDED_PRODUCT";
     shopPipe.reason = "COLLECTIVE_UI_IMPORT_REQUIRED";
     shopPipe.recommendedCollectiveCandidate = recommended;
+    shopPipe.expectedImport = {
+      ...recommended,
+      selectedAt: heliosNow(),
+      attempt,
+      query: plan.query
+    };
     mission.status = "WAITING";
     mission.checkpoint = "OWNER_IMPORT_RECOMMENDED_PRODUCT";
     mission.decisionRequired = {
@@ -1935,11 +2007,16 @@ async function heliosProductPerformance() {
   };
 }
 
-async function heliosGlobalMarketScan(stores, objective = "") {
+async function heliosGlobalMarketScan(stores, objective = "", options = {}) {
   const targets = stores.length ? stores.join(" + ") : "SHOPIFY";
   const baseObjective =
     objective ||
     "Trova le opportunità commerciali globali con il miglior rapporto domanda/crescita/saturazione e rischio contenuto.";
+  const avoidFamilies = new Set(
+    (Array.isArray(options?.avoidOpportunityFamilies) ? options.avoidOpportunityFamilies : [])
+      .map((x) => String(x || "").trim().toUpperCase())
+      .filter(Boolean)
+  );
 
   const queries = [];
 
@@ -1989,6 +2066,8 @@ REGOLE:
 - Breakout Confidence misura la probabilità che il trend sia nella fase iniziale di accelerazione.
 - Evita armi, sostanze regolamentate, farmaci, prodotti medici ad alto rischio, claims sanitari, contraffazioni, prodotti IP/trademark dipendenti, prodotti illegali o ad alto rischio reputazionale.
 - Per SHOPIFY preferisci famiglie di prodotti fisici che possano realisticamente esistere in cataloghi multi-brand/Shopify Collective e che funzionino in uno store umbrella multi-nicchia.
+- DIVERSITY GATE: restituisci almeno 6 opportunità SHOPIFY appartenenti a macro-famiglie differenti. Non più di UNA opportunità per la stessa macro-famiglia (es. cleaning, beauty, pet, travel, kitchen, tech, home organization, accessories, hobby/outdoor, fitness/wellness).
+- Evita le macro-famiglie in cooldown da missioni fallite: ${JSON.stringify([...avoidFamilies])}. Se la lista contiene CLEANING, non proporre detergenti, panni, spugne, laundry o surface cleaner.
 - Per ETSY preferisci prodotti digitali originali che HELIOS possa creare integralmente con alta qualità.
 - Una opportunità con score attuale inferiore può vincere se Growth e Breakout sono forti e la saturazione è bassa.
 - Per ogni opportunità SHOPIFY genera anche un piano di ricerca Collective MOLTO PRECISO:
@@ -2206,13 +2285,23 @@ ${JSON.stringify(sourcePayload).slice(0, 26000)}
       return bDyn - aDyn;
     });
 
+  const diversified = [];
+  const seenFamilies = new Set();
+  for (const opportunity of opportunities) {
+    const family = heliosOpportunityFamily(opportunity);
+    if (avoidFamilies.has(family) || seenFamilies.has(family)) continue;
+    diversified.push({ ...opportunity, family });
+    seenFamilies.add(family);
+    if (diversified.length >= 10) break;
+  }
+
   return {
     ok: true,
     provider: ai.provider,
     marketScope: out.marketScope || "GLOBAL",
     sourceConfidence: out.sourceConfidence || "MEDIUM",
     signals,
-    opportunities
+    opportunities: diversified
   };
 }
 
@@ -2375,15 +2464,32 @@ function heliosQualityGate({ product, score, optimization }) {
     completeListing: Boolean(optimization?.listing?.title && optimization?.listing?.descriptionHtml)
   };
 
-  const qualityValues = Object.values(optimization?.quality || {}).filter((x) => Number.isFinite(Number(x)));
-  const qualityAverage = qualityValues.length
-    ? qualityValues.reduce((s, x) => s + Number(x), 0) / qualityValues.length
+  const q = optimization?.quality || {};
+  const weighted = [
+    [q.content, 0.20],
+    [q.visual, 0.08],
+    [q.usability, 0.14],
+    [q.perceivedValue, 0.14],
+    [q.listing, 0.28],
+    [q.seo, 0.16]
+  ].filter(([value]) => Number.isFinite(Number(value)));
+  const weightTotal = weighted.reduce((sum, [, weight]) => sum + weight, 0);
+  const qualityAverage = weightTotal
+    ? weighted.reduce((sum, [value, weight]) => sum + Number(value) * weight, 0) / weightTotal
     : 0;
 
-  const commercial = score?.heliosScore ?? 0;
+  const commercial = Number(score?.heliosScore || 0);
+  const fit = Number(score?.fit ?? score?.market?.fit ?? 0);
+  const margin = Number(score?.economics?.grossMarginPct ?? 0);
   const confidence = score?.confidence || "LOW";
+  const risk = String(optimization?.commerceShield?.risk || "MEDIUM").toUpperCase();
   const hardPass = Object.values(hard).every(Boolean);
-  const pass = hardPass && qualityAverage >= 65 && commercial >= 60 && optimization?.commerceShield?.risk !== "HIGH";
+
+  // Calibrato per un test commerciale reale: un prodotto fortemente coerente,
+  // con margine/stock reali e rischio non HIGH, non viene più bloccato solo perché
+  // i segnali di mercato secondari sono conservativi. Gli hard gate restano intatti.
+  const commercialPass = commercial >= 55 || (fit >= 85 && margin >= 18 && commercial >= 50);
+  const pass = hardPass && fit >= 70 && qualityAverage >= 60 && commercialPass && risk !== "HIGH";
 
   return {
     pass,
@@ -2391,7 +2497,10 @@ function heliosQualityGate({ product, score, optimization }) {
     hardGates: hard,
     qualityAverage: Math.round(qualityAverage),
     commercialScore: commercial,
+    fit: Math.round(fit),
+    marginPct: Number.isFinite(margin) ? heliosRound(margin, 1) : null,
     confidence,
+    risk,
     status: pass ? "PASS" : hardPass ? "REPAIR_OR_DECISION" : "BLOCKED"
   };
 }
@@ -2880,16 +2989,36 @@ async function heliosAnalyzeCollectiveCandidates({
     (p) => p.status === "DRAFT"
   );
 
+  // Se HELIOS aveva indicato un prodotto preciso dallo screenshot, al ritorno
+  // prova prima a riconoscere QUEL prodotto tra i nuovi import. Questo impedisce
+  // che vecchie bozze o altri fornitori facciano ripartire il ranking da zero.
+  const expectedMatch = heliosFindExpectedImportedProduct(
+    newlyImported.length ? newlyImported : usable,
+    shopPipe.expectedImport || shopPipe.recommendedCollectiveCandidate || null
+  );
+
   // Se la missione ha catturato un baseline Collective, HELIOS analizza SOLO
-  // prodotti importati dopo quel checkpoint. In questo modo bozze vecchie o
-  // candidati rifiutati da missioni precedenti non contaminano una nuova missione.
-  const candidates = newlyImported.length
+  // prodotti importati dopo quel checkpoint. Se trova il prodotto raccomandato,
+  // lo pinna come unico candidato del checkpoint corrente.
+  const candidates = expectedMatch?.product
+    ? [expectedMatch.product]
+    : newlyImported.length
     ? newlyImported
     : hasCollectiveBaseline
     ? []
     : draftCandidates.length
     ? draftCandidates
     : usable;
+
+  if (expectedMatch?.product) {
+    shopPipe.expectedImportDetected = {
+      productId: expectedMatch.product.id,
+      title: expectedMatch.product.title,
+      vendor: expectedMatch.product.vendor || null,
+      matchScore: Math.round(expectedMatch.score),
+      detectedAt: heliosNow()
+    };
+  }
 
   shopPipe.candidateCount = candidates.length;
   shopPipe.collectiveTotal = allProducts.length;
@@ -2903,7 +3032,9 @@ async function heliosAnalyzeCollectiveCandidates({
       trigger,
       totalCollectiveProducts: allProducts.length,
       eligibleCandidates: candidates.length,
-      newlyImported: newlyImported.length
+      newlyImported: newlyImported.length,
+      expectedImport: shopPipe.expectedImport?.title || null,
+      expectedImportDetected: shopPipe.expectedImportDetected?.title || null
     }
   ];
 
@@ -3127,6 +3258,14 @@ async function heliosAnalyzeCollectiveCandidates({
   shopPipe.match = bestMatch;
   shopPipe.score = score;
   shopPipe.progress = 56;
+  shopPipe.lastEvaluatedImport = {
+    ...(shopPipe.expectedImport || {}),
+    productId: product.id,
+    actualTitle: product.title,
+    actualVendor: product.vendor || null,
+    fit: Math.round(bestMatch.fit || 0),
+    evaluatedAt: heliosNow()
+  };
 
   if (!optimization.ok) {
     shopPipe.status = "WAITING";
@@ -3236,6 +3375,7 @@ async function heliosAnalyzeCollectiveCandidates({
         );
 
       if (
+        !shopPipe.expectedImport &&
         remainingCandidates.length &&
         autoCandidateRetries < 3
       ) {
@@ -3307,9 +3447,16 @@ async function heliosAnalyzeCollectiveCandidates({
           attempt: nextAttempt,
           title: "CANDIDATE REJECTED BY QUALITY GATE",
           message:
-            `HELIOS ha scartato “${product.title}” perché non supera gli hard gate di qualità/commercio. ` +
-            `Il prodotto resta non pubblicato. Cerca il prossimo candidato con la query indicata.`,
+            `VALUTAZIONE COMPLETATA — “${product.title}” NON È STATO PUBBLICATO. ` +
+            `Fit ${Math.round(bestMatch.fit || 0)}/100 · HELIOS Score ${Math.round(score.heliosScore || 0)}/100 · ` +
+            `Quality ${Math.round(gate.qualityAverage || 0)}/100 · Risk ${optimization?.commerceShield?.risk || "MEDIUM"}. ` +
+            `Motivo: ${Object.entries(gate.hardGates || {}).filter(([,v]) => !v).map(([k]) => k).join(", ") || optimization?.commerceShield?.reasons?.join(", ") || "hard gate non superato"}. ` +
+            `Il prodotto resta in BOZZA. HELIOS ha preparato il prossimo tentativo senza metterlo online.`,
           reason: "QUALITY_HARD_GATE_REJECTED",
+          context: {
+            product: shopPipe.product,
+            evaluation: { fit: bestMatch.fit, heliosScore: score.heliosScore, qualityAverage: gate.qualityAverage, risk: optimization?.commerceShield?.risk, hardGates: gate.hardGates }
+          },
           completed: [
             "SUPPLIER DETECTED",
             "PRODUCT MATCH",
@@ -3346,7 +3493,7 @@ async function heliosAnalyzeCollectiveCandidates({
         severity: "ACTION_REQUIRED",
         title: "QUALITY REPAIR REQUIRED",
         message:
-          "Il candidato è valido negli hard gate, ma la qualità commerciale/listing non è ancora sufficiente per la pubblicazione automatica.",
+          `VALUTAZIONE COMPLETATA — “${product.title}” non è ancora LIVE. Fit ${Math.round(bestMatch.fit || 0)}/100 · HELIOS Score ${Math.round(score.heliosScore || 0)}/100 · Quality ${Math.round(gate.qualityAverage || 0)}/100. HELIOS ha già eseguito i tentativi di self-repair disponibili e non pubblicherà finché il gate non passa.`,
         reason: JSON.stringify(gate.hardGates),
         missionId: mission.id,
         state: "WAITING",
@@ -3371,6 +3518,8 @@ async function heliosAnalyzeCollectiveCandidates({
   }
 
   shopPipe.status = "READY_TO_PUBLISH";
+  shopPipe.expectedImport = null;
+  shopPipe.recommendedCollectiveCandidate = null;
   shopPipe.step = "QUALITY_GATE_PASSED";
   shopPipe.progress = 78;
   shopPipe.reason = null;
@@ -3566,7 +3715,8 @@ async function heliosRunMissionStart(body) {
 
   const scan = await heliosGlobalMarketScan(
     stores,
-    mission.objective
+    mission.objective,
+    { avoidOpportunityFamilies: body?.avoidOpportunityFamilies || [] }
   );
 
   if (
@@ -3755,9 +3905,19 @@ async function heliosRetryMissionScan(body) {
     ? incoming.selectedStores.map((x) => String(x || "").toUpperCase()).filter(Boolean)
     : heliosSelectedStores(body);
 
+  const avoidOpportunityFamilies = [
+    ...new Set([
+      ...(Array.isArray(incoming.marketCooldownFamilies) ? incoming.marketCooldownFamilies : []),
+      ...(Array.isArray(incoming?.pipelines?.SHOPIFY?.rejectedOpportunityKeys)
+        ? incoming.pipelines.SHOPIFY.rejectedOpportunityKeys.map((name) => heliosOpportunityFamily({ name }))
+        : [])
+    ].map((x) => String(x || "").toUpperCase()).filter(Boolean))
+  ];
+
   const result = await heliosRunMissionStart({
     stores,
-    objective: incoming.objective || body?.objective || "Find the highest-value compliant commercial opportunity."
+    objective: incoming.objective || body?.objective || "Find the highest-value compliant commercial opportunity across diverse product categories.",
+    avoidOpportunityFamilies
   });
 
   if (result?.mission) {
@@ -3774,6 +3934,7 @@ async function heliosRetryMissionScan(body) {
       { at: heliosNow(), type: "MARKET_SCAN_RETRIED" },
       ...generatedEvents
     ];
+    result.mission.marketCooldownFamilies = avoidOpportunityFamilies;
     result.mission.updatedAt = heliosNow();
   }
 
@@ -4131,7 +4292,7 @@ async function heliosPublishMissionProduct(mission, { store = "SHOPIFY" } = {}) 
         price: current.variants?.[0]?.retailPrice ?? null,
         inventory: current.inventory ?? null,
         actions: [
-          { id: "VIEW_PRODUCT", label: "VIEW PRODUCT", type: "LOCAL" },
+          { id: "VIEW_PRODUCT", label: "VEDI PRODOTTO", type: "LOCAL" },
           { id: "FULL_ANALYSIS", label: "ANALISI COMPLETA", type: "LOCAL" },
           { id: "SHOPIFY", label: "SHOPIFY ↗", type: "LINK", url: heliosShopifyAdminUrl(`products/${current.legacyId || ""}`) }
         ]
@@ -6309,7 +6470,7 @@ export default async function handler(
         });
       }
 
-      const scan = await heliosGlobalMarketScan(stores, body.objective || "");
+      const scan = await heliosGlobalMarketScan(stores, body.objective || "", { avoidOpportunityFamilies: body.avoidOpportunityFamilies || [] });
       return res.status(scan.ok ? 200 : 503).json(scan);
     }
 
