@@ -162,7 +162,7 @@ async function shopifyFetch(
 // La logica resta in api/chat.js come richiesto.
 // ============================================================
 
-const HELIOS_VERSION = "2.8.0";
+const HELIOS_VERSION = "2.8.1";
 const HELIOS_MAX_COLLECTIVE_SEARCH_ATTEMPTS = 3;
 const HELIOS_COLLECTIVE_TAG = "Shopify Collective";
 const HELIOS_DEFAULT_INITIAL_CAPITAL = 5;
@@ -4113,6 +4113,157 @@ async function heliosResumeMission(body) {
   };
 }
 
+
+async function heliosEvaluateImportedCatalog(body = {}) {
+  const incoming = body?.mission || null;
+
+  if (!incoming?.id) {
+    return {
+      ok: false,
+      actionCard: heliosActionCard({
+        severity: "ACTION_REQUIRED",
+        title: "MISSION REQUIRED",
+        message: "Avvia o riprendi una missione HELIOS prima di rivalutare il catalogo importato.",
+        reason: "MISSION_MISSING"
+      })
+    };
+  }
+
+  const mission = JSON.parse(JSON.stringify(incoming));
+  const stores = Array.isArray(mission.selectedStores)
+    ? mission.selectedStores.map((x) => String(x).toUpperCase())
+    : heliosSelectedStores(body);
+
+  if (!stores.includes("SHOPIFY")) {
+    return {
+      ok: false,
+      mission,
+      actionCard: heliosActionCard({
+        severity: "CRITICAL",
+        title: "SHOPIFY NOT AUTHORIZED",
+        message: "La missione corrente non autorizza Shopify.",
+        reason: "STORE_NOT_ENABLED_FOR_MISSION",
+        missionId: mission.id
+      })
+    };
+  }
+
+  mission.selectedStores = stores;
+  mission.pipelines = mission.pipelines || {};
+  mission.pipelines.SHOPIFY = mission.pipelines.SHOPIFY || {
+    status: "ACTIVE",
+    step: "CATALOG_REEVALUATION",
+    progress: 42,
+    collectiveSearchAttempt: 0,
+    rejectedProductIds: []
+  };
+
+  const shopPipe = mission.pipelines.SHOPIFY;
+  const opportunity =
+    shopPipe.opportunity ||
+    mission?.marketScan?.opportunities?.find?.(
+      (o) => Array.isArray(o?.channelFit) && o.channelFit.includes("SHOPIFY")
+    ) ||
+    mission?.marketScan?.opportunities?.[0] ||
+    null;
+
+  if (!opportunity) {
+    return {
+      ok: false,
+      mission,
+      actionCard: heliosActionCard({
+        severity: "ACTION_REQUIRED",
+        title: "OPPORTUNITY REQUIRED",
+        message: "HELIOS non può rivalutare il catalogo senza un'opportunità Shopify attiva.",
+        reason: "MISSION_OPPORTUNITY_MISSING",
+        missionId: mission.id,
+        actions: [{ id: "RETRY_SCAN", label: "NEW MARKET SCAN", type: "BACKEND" }]
+      })
+    };
+  }
+
+  const products = await heliosCollectiveProducts({
+    limit: body?.limit || 200
+  });
+
+  const imported = products.filter(
+    (p) => p?.id && p.status !== "ARCHIVED"
+  );
+
+  if (!imported.length) {
+    return {
+      ok: false,
+      mission,
+      actionCard: heliosActionCard({
+        severity: "ACTION_REQUIRED",
+        title: "NO IMPORTED PRODUCTS",
+        message: "Non ci sono prodotti Shopify Collective importati da rivalutare.",
+        reason: "NO_COLLECTIVE_PRODUCTS_IMPORTED",
+        missionId: mission.id
+      })
+    };
+  }
+
+  // Explicit owner request: re-open every imported candidate for evaluation,
+  // but do NOT start another Discovery search until this catalog pass finishes.
+  shopPipe.opportunity = opportunity;
+  shopPipe.expectedImport = null;
+  shopPipe.recommendedCollectiveCandidate = null;
+  shopPipe.expectedImportDetected = null;
+  shopPipe.rejectedProductIds = [];
+  shopPipe.autoCandidateRetries = 0;
+  shopPipe.collectiveSearchAttempt = 0;
+  shopPipe.qualityRepairAttempts = 0;
+  shopPipe.collectiveSnapshot = {
+    capturedAt: heliosNow(),
+    ids: []
+  };
+  shopPipe.status = "ACTIVE";
+  shopPipe.step = "EVALUATING_IMPORTED_CATALOG";
+  shopPipe.progress = Math.max(Number(shopPipe.progress || 0), 42);
+  shopPipe.reason = null;
+
+  mission.status = "ACTIVE";
+  mission.checkpoint = "EVALUATING_IMPORTED_CATALOG";
+  mission.progress = Math.max(Number(mission.progress || 0), 42);
+  mission.decisionRequired = null;
+  mission.updatedAt = heliosNow();
+  mission.events = [
+    ...(Array.isArray(mission.events) ? mission.events : []),
+    {
+      at: heliosNow(),
+      type: "IMPORTED_CATALOG_REEVALUATION_STARTED",
+      productCount: imported.length
+    }
+  ];
+
+  const result = await heliosAnalyzeCollectiveCandidates({
+    mission,
+    products: imported,
+    trigger: "OWNER_CATALOG_REEVALUATION",
+    autoPublish: true
+  });
+
+  if (result?.mission) {
+    result.mission.events = [
+      ...(Array.isArray(result.mission.events) ? result.mission.events : []),
+      {
+        at: heliosNow(),
+        type: "IMPORTED_CATALOG_REEVALUATION_COMPLETED",
+        productCount: imported.length,
+        published:
+          result?.mission?.pipelines?.SHOPIFY?.status === "LIVE"
+      }
+    ];
+  }
+
+  return {
+    ...result,
+    catalogEvaluation: true,
+    evaluatedProductCount: imported.length
+  };
+}
+
 async function heliosPublishMissionProduct(mission, { store = "SHOPIFY" } = {}) {
   const target = String(store || "SHOPIFY").toUpperCase();
   if (!mission?.selectedStores?.includes(target)) {
@@ -6699,6 +6850,28 @@ export default async function handler(
             attempt
           )
       });
+    }
+
+
+    if (body.action === "helios_mission_evaluate_imports") {
+      try {
+        const result = await heliosEvaluateImportedCatalog(body);
+        return res.status(result.ok ? 200 : 409).json(result);
+      } catch (error) {
+        return res.status(500).json({
+          error: String(error?.message || error),
+          actionCard: heliosActionCard({
+            severity: "CRITICAL",
+            title: "CATALOG EVALUATION ERROR",
+            message: "HELIOS ha fermato la rivalutazione del catalogo senza pubblicare stati parziali.",
+            reason: String(error?.message || error),
+            missionId: body?.mission?.id || null,
+            actions: [
+              { id: "EVALUATE_IMPORTED_PRODUCTS", label: "RETRY EVALUATION", type: "BACKEND" }
+            ]
+          })
+        });
+      }
     }
 
     if (body.action === "helios_mission_resume") {
