@@ -214,21 +214,56 @@ function heliosSlug(value) {
 function heliosSafeJson(raw, fallback = null) {
   if (!raw) return fallback;
   if (typeof raw === "object") return raw;
-  try {
-    return JSON.parse(String(raw));
-  } catch {
-    const cleaned = String(raw)
-      .trim()
+
+  const text = String(raw).trim();
+  const attempts = [
+    text,
+    text
       .replace(/^```json/i, "")
       .replace(/^```/, "")
       .replace(/```$/, "")
-      .trim();
-    try {
-      return JSON.parse(cleaned);
-    } catch {
-      return fallback;
+      .trim()
+  ];
+
+  // Some multimodal/router models return a valid JSON object surrounded by
+  // a short sentence or markdown. Extract the first balanced JSON object
+  // without trying to repair invented/malformed fields.
+  const source = attempts[1];
+  let start = -1;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < source.length; i++) {
+    const ch = source[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === "{") {
+      if (depth === 0) start = i;
+      depth += 1;
+    } else if (ch === "}" && depth > 0) {
+      depth -= 1;
+      if (depth === 0 && start >= 0) {
+        attempts.push(source.slice(start, i + 1));
+        break;
+      }
     }
   }
+
+  for (const candidate of attempts) {
+    if (!candidate) continue;
+    try {
+      return JSON.parse(candidate);
+    } catch {}
+  }
+  return fallback;
 }
 
 function heliosSelectedStores(body) {
@@ -1302,7 +1337,9 @@ async function heliosAIJsonWithImage(
             }
           ],
           temperature,
-          max_tokens: maxTokens,
+          // Keep the total multimodal request below low-tier TPM limits.
+          // Screenshot ranking needs a compact JSON, not thousands of output tokens.
+          max_tokens: Math.min(maxTokens, 1200),
           response_format: { type: "json_object" },
           stream: false
         })
@@ -1615,7 +1652,7 @@ FORMATO:
     prompt,
     body.imageBase64 || body.image || "",
     body.mediaType || body.mime || "image/png",
-    { temperature: 0.02, maxTokens: 5000 }
+    { temperature: 0.02, maxTokens: 1200 }
   );
 
   if (!ai.ok) {
