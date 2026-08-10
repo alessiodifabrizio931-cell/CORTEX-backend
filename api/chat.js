@@ -162,7 +162,7 @@ async function shopifyFetch(
 // La logica resta in api/chat.js come richiesto.
 // ============================================================
 
-const HELIOS_VERSION = "2.7.0";
+const HELIOS_VERSION = "2.7.1";
 const HELIOS_MAX_COLLECTIVE_SEARCH_ATTEMPTS = 3;
 const HELIOS_COLLECTIVE_TAG = "Shopify Collective";
 const HELIOS_DEFAULT_INITIAL_CAPITAL = 5;
@@ -922,37 +922,92 @@ async function heliosWebSignal(query, { max = 6, deep = false } = {}) {
   }
 }
 
-async function heliosAIJson(prompt, { temperature = 0.15, maxTokens = 5000 } = {}) {
+async function heliosAIJson(
+  prompt,
+  { temperature = 0.15, maxTokens = 5000 } = {}
+) {
+  const diagnostics = [];
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
   const geminiKey = process.env.GEMINI_API_KEY;
   if (geminiKey) {
-    try {
-      const r = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${geminiKey}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            contents: [{ role: "user", parts: [{ text: prompt }] }],
-            generationConfig: {
-              temperature,
-              maxOutputTokens: maxTokens,
-              responseMimeType: "application/json"
-            }
-          })
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const r = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${geminiKey}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              contents: [{ role: "user", parts: [{ text: prompt }] }],
+              generationConfig: {
+                temperature,
+                maxOutputTokens: maxTokens,
+                responseMimeType: "application/json"
+              }
+            })
+          }
+        );
+
+        const rawBody = await r.text();
+        const d = heliosSafeJson(rawBody, {}) || {};
+
+        if (r.ok) {
+          const raw = (d?.candidates?.[0]?.content?.parts || [])
+            .map((x) => x.text || "")
+            .join("")
+            .trim();
+          const parsed = heliosSafeJson(raw);
+          if (parsed) {
+            return {
+              ok: true,
+              provider: "gemini",
+              model: MODEL,
+              data: parsed,
+              diagnostics
+            };
+          }
+          diagnostics.push({
+            provider: "gemini",
+            model: MODEL,
+            status: r.status,
+            error: raw ? "INVALID_JSON_OUTPUT" : "EMPTY_OUTPUT"
+          });
+        } else {
+          diagnostics.push({
+            provider: "gemini",
+            model: MODEL,
+            status: r.status,
+            error: String(d?.error?.message || `HTTP ${r.status}`).slice(0, 500)
+          });
         }
-      );
-      const d = await r.json();
-      if (r.ok) {
-        const raw = (d?.candidates?.[0]?.content?.parts || []).map((x) => x.text || "").join("").trim();
-        const parsed = heliosSafeJson(raw);
-        if (parsed) return { ok: true, provider: "gemini", data: parsed };
+
+        if (attempt === 0 && (r.status === 429 || r.status >= 500)) {
+          await wait(700);
+          continue;
+        }
+        break;
+      } catch (error) {
+        diagnostics.push({
+          provider: "gemini",
+          model: MODEL,
+          status: null,
+          error: String(error?.message || error).slice(0, 500)
+        });
+        if (attempt === 0) {
+          await wait(500);
+          continue;
+        }
       }
-    } catch {}
+    }
+  } else {
+    diagnostics.push({ provider: "gemini", configured: false, error: "GEMINI_API_KEY_MISSING" });
   }
 
   const orKey = process.env.OPENROUTER_API_KEY;
   if (orKey) {
     try {
+      const orModel = process.env.OPENROUTER_MODEL || "openrouter/free";
       const r = await fetch("https://openrouter.ai/api/v1/chat/completions", {
         method: "POST",
         headers: {
@@ -962,32 +1017,146 @@ async function heliosAIJson(prompt, { temperature = 0.15, maxTokens = 5000 } = {
           "X-Title": "CORTEX HELIOS"
         },
         body: JSON.stringify({
-          model: process.env.OPENROUTER_MODEL || "openrouter/free",
-          messages: [{ role: "user", content: prompt }],
+          model: orModel,
+          messages: [
+            {
+              role: "system",
+              content: "Return only one valid JSON object. Do not use markdown fences or prose outside JSON."
+            },
+            { role: "user", content: prompt }
+          ],
           temperature,
           max_tokens: maxTokens,
           stream: false
         })
       });
-      const d = await r.json();
+
+      const rawBody = await r.text();
+      const d = heliosSafeJson(rawBody, {}) || {};
       if (r.ok) {
         const raw = d?.choices?.[0]?.message?.content;
-        const text = Array.isArray(raw)
+        const content = Array.isArray(raw)
           ? raw.map((x) => x?.text || x?.content || "").join("")
           : String(raw || "");
-        const parsed = heliosSafeJson(text);
-        if (parsed) return { ok: true, provider: "openrouter", data: parsed };
+        const parsed = heliosSafeJson(content);
+        if (parsed) {
+          return {
+            ok: true,
+            provider: "openrouter",
+            model: d?.model || orModel,
+            data: parsed,
+            diagnostics
+          };
+        }
+        diagnostics.push({
+          provider: "openrouter",
+          model: d?.model || orModel,
+          status: r.status,
+          error: content ? "INVALID_JSON_OUTPUT" : "EMPTY_OUTPUT"
+        });
+      } else {
+        diagnostics.push({
+          provider: "openrouter",
+          model: orModel,
+          status: r.status,
+          error: String(d?.error?.message || d?.message || `HTTP ${r.status}`).slice(0, 500)
+        });
       }
-    } catch {}
+    } catch (error) {
+      diagnostics.push({
+        provider: "openrouter",
+        model: process.env.OPENROUTER_MODEL || "openrouter/free",
+        status: null,
+        error: String(error?.message || error).slice(0, 500)
+      });
+    }
+  } else {
+    diagnostics.push({ provider: "openrouter", configured: false, error: "OPENROUTER_API_KEY_MISSING" });
   }
+
+  // Third provider: use Groq as a true HELIOS JSON fallback, mirroring the
+  // main CORTEX router. JSON Object Mode prevents malformed structured output.
+  const groqKey = process.env.GROQ_API_KEY;
+  if (groqKey) {
+    try {
+      const groqModel = process.env.GROQ_JSON_MODEL || "openai/gpt-oss-120b";
+      const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${groqKey}`
+        },
+        body: JSON.stringify({
+          model: groqModel,
+          messages: [
+            {
+              role: "system",
+              content: "Return exactly one valid JSON object and nothing else."
+            },
+            { role: "user", content: prompt }
+          ],
+          temperature,
+          max_tokens: maxTokens,
+          response_format: { type: "json_object" },
+          stream: false
+        })
+      });
+
+      const rawBody = await r.text();
+      const d = heliosSafeJson(rawBody, {}) || {};
+      if (r.ok) {
+        const raw = d?.choices?.[0]?.message?.content;
+        const content = Array.isArray(raw)
+          ? raw.map((x) => x?.text || x?.content || "").join("")
+          : String(raw || "");
+        const parsed = heliosSafeJson(content);
+        if (parsed) {
+          return {
+            ok: true,
+            provider: "groq",
+            model: d?.model || groqModel,
+            data: parsed,
+            diagnostics
+          };
+        }
+        diagnostics.push({
+          provider: "groq",
+          model: d?.model || groqModel,
+          status: r.status,
+          error: content ? "INVALID_JSON_OUTPUT" : "EMPTY_OUTPUT"
+        });
+      } else {
+        diagnostics.push({
+          provider: "groq",
+          model: groqModel,
+          status: r.status,
+          error: String(d?.error?.message || d?.message || `HTTP ${r.status}`).slice(0, 500)
+        });
+      }
+    } catch (error) {
+      diagnostics.push({
+        provider: "groq",
+        model: process.env.GROQ_JSON_MODEL || "openai/gpt-oss-120b",
+        status: null,
+        error: String(error?.message || error).slice(0, 500)
+      });
+    }
+  } else {
+    diagnostics.push({ provider: "groq", configured: false, error: "GROQ_API_KEY_MISSING" });
+  }
+
+  const summary = diagnostics
+    .map((x) => `${x.provider}:${x.status ?? "NA"}:${x.error || "UNKNOWN"}`)
+    .join(" | ")
+    .slice(0, 1400);
 
   return {
     ok: false,
     provider: null,
-    error: "Nessun provider AI disponibile per HELIOS JSON"
+    error: `HELIOS JSON provider unavailable. ${summary}`,
+    diagnostics
   };
 }
-
 
 async function heliosAIJsonWithImage(
   prompt,
@@ -1002,6 +1171,8 @@ async function heliosAIJsonWithImage(
   if (image.length > 7_000_000) {
     return { ok: false, provider: null, error: "Screenshot troppo grande: usa un'immagine sotto circa 5 MB." };
   }
+
+  const diagnostics = [];
 
   const geminiKey = process.env.GEMINI_API_KEY;
   if (geminiKey) {
@@ -1034,21 +1205,30 @@ async function heliosAIJsonWithImage(
           })
         }
       );
-      const d = await r.json();
+      const rawBody = await r.text();
+      const d = heliosSafeJson(rawBody, {}) || {};
       if (r.ok) {
         const raw = (d?.candidates?.[0]?.content?.parts || [])
           .map((x) => x.text || "")
           .join("")
           .trim();
         const parsed = heliosSafeJson(raw);
-        if (parsed) return { ok: true, provider: "gemini", data: parsed };
+        if (parsed) return { ok: true, provider: "gemini", model: MODEL, data: parsed, diagnostics };
+        diagnostics.push({ provider: "gemini", model: MODEL, status: r.status, error: raw ? "INVALID_JSON_OUTPUT" : "EMPTY_OUTPUT" });
+      } else {
+        diagnostics.push({ provider: "gemini", model: MODEL, status: r.status, error: String(d?.error?.message || `HTTP ${r.status}`).slice(0, 500) });
       }
-    } catch {}
+    } catch (error) {
+      diagnostics.push({ provider: "gemini", model: MODEL, status: null, error: String(error?.message || error).slice(0, 500) });
+    }
+  } else {
+    diagnostics.push({ provider: "gemini", configured: false, error: "GEMINI_API_KEY_MISSING" });
   }
 
   const orKey = process.env.OPENROUTER_API_KEY;
   if (orKey) {
     try {
+      const orVisionModel = process.env.OPENROUTER_VISION_MODEL || process.env.OPENROUTER_MODEL || "openrouter/free";
       const r = await fetch("https://openrouter.ai/api/v1/chat/completions", {
         method: "POST",
         headers: {
@@ -1058,17 +1238,15 @@ async function heliosAIJsonWithImage(
           "X-Title": "CORTEX HELIOS Collective Vision"
         },
         body: JSON.stringify({
-          model: process.env.OPENROUTER_VISION_MODEL || process.env.OPENROUTER_MODEL || "openrouter/free",
+          model: orVisionModel,
           messages: [
             {
               role: "user",
               content: [
-                { type: "text", text: prompt },
+                { type: "text", text: `${prompt}\nReturn only a valid JSON object.` },
                 {
                   type: "image_url",
-                  image_url: {
-                    url: `data:${mediaType || "image/png"};base64,${image}`
-                  }
+                  image_url: { url: `data:${mediaType || "image/png"};base64,${image}` }
                 }
               ]
             }
@@ -1078,24 +1256,90 @@ async function heliosAIJsonWithImage(
           stream: false
         })
       });
-      const d = await r.json();
+      const rawBody = await r.text();
+      const d = heliosSafeJson(rawBody, {}) || {};
       if (r.ok) {
         const raw = d?.choices?.[0]?.message?.content;
-        const text = Array.isArray(raw)
+        const content = Array.isArray(raw)
           ? raw.map((x) => x?.text || x?.content || "").join("")
           : String(raw || "");
-        const parsed = heliosSafeJson(text);
-        if (parsed) return { ok: true, provider: "openrouter", data: parsed };
+        const parsed = heliosSafeJson(content);
+        if (parsed) return { ok: true, provider: "openrouter", model: d?.model || orVisionModel, data: parsed, diagnostics };
+        diagnostics.push({ provider: "openrouter", model: d?.model || orVisionModel, status: r.status, error: content ? "INVALID_JSON_OUTPUT" : "EMPTY_OUTPUT" });
+      } else {
+        diagnostics.push({ provider: "openrouter", model: orVisionModel, status: r.status, error: String(d?.error?.message || d?.message || `HTTP ${r.status}`).slice(0, 500) });
       }
-    } catch {}
+    } catch (error) {
+      diagnostics.push({ provider: "openrouter", model: process.env.OPENROUTER_VISION_MODEL || process.env.OPENROUTER_MODEL || "openrouter/free", status: null, error: String(error?.message || error).slice(0, 500) });
+    }
+  } else {
+    diagnostics.push({ provider: "openrouter", configured: false, error: "OPENROUTER_API_KEY_MISSING" });
   }
+
+  // Groq vision fallback. qwen/qwen3.6-27b supports image input and JSON mode.
+  const groqKey = process.env.GROQ_API_KEY;
+  if (groqKey) {
+    try {
+      const groqVisionModel = process.env.GROQ_VISION_MODEL || "qwen/qwen3.6-27b";
+      const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${groqKey}`
+        },
+        body: JSON.stringify({
+          model: groqVisionModel,
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "text", text: `${prompt}\nReturn only a valid JSON object.` },
+                {
+                  type: "image_url",
+                  image_url: { url: `data:${mediaType || "image/png"};base64,${image}` }
+                }
+              ]
+            }
+          ],
+          temperature,
+          max_tokens: maxTokens,
+          response_format: { type: "json_object" },
+          stream: false
+        })
+      });
+      const rawBody = await r.text();
+      const d = heliosSafeJson(rawBody, {}) || {};
+      if (r.ok) {
+        const raw = d?.choices?.[0]?.message?.content;
+        const content = Array.isArray(raw)
+          ? raw.map((x) => x?.text || x?.content || "").join("")
+          : String(raw || "");
+        const parsed = heliosSafeJson(content);
+        if (parsed) return { ok: true, provider: "groq", model: d?.model || groqVisionModel, data: parsed, diagnostics };
+        diagnostics.push({ provider: "groq", model: d?.model || groqVisionModel, status: r.status, error: content ? "INVALID_JSON_OUTPUT" : "EMPTY_OUTPUT" });
+      } else {
+        diagnostics.push({ provider: "groq", model: groqVisionModel, status: r.status, error: String(d?.error?.message || d?.message || `HTTP ${r.status}`).slice(0, 500) });
+      }
+    } catch (error) {
+      diagnostics.push({ provider: "groq", model: process.env.GROQ_VISION_MODEL || "qwen/qwen3.6-27b", status: null, error: String(error?.message || error).slice(0, 500) });
+    }
+  } else {
+    diagnostics.push({ provider: "groq", configured: false, error: "GROQ_API_KEY_MISSING" });
+  }
+
+  const summary = diagnostics
+    .map((x) => `${x.provider}:${x.status ?? "NA"}:${x.error || "UNKNOWN"}`)
+    .join(" | ")
+    .slice(0, 1400);
 
   return {
     ok: false,
     provider: null,
-    error: "Nessun provider vision disponibile per analizzare lo screenshot Collective"
+    error: `HELIOS vision provider unavailable. ${summary}`,
+    diagnostics
   };
 }
+
 
 function heliosMissionOpportunityList(mission) {
   return (Array.isArray(mission?.marketScan?.opportunities)
@@ -3452,6 +3696,58 @@ async function heliosRunMissionStart(body) {
         HELIOS_DEFAULT_INITIAL_CAPITAL,
       objective: mission.objective
     }
+  };
+}
+
+
+async function heliosRetryMissionScan(body) {
+  const incoming = body?.mission || null;
+  if (!incoming?.id) {
+    return {
+      ok: false,
+      actionCard: heliosActionCard({
+        severity: "ACTION_REQUIRED",
+        title: "MISSION REQUIRED",
+        message: "Non esiste una missione HELIOS da riprovare.",
+        reason: "MISSION_MISSING"
+      })
+    };
+  }
+
+  const stores = Array.isArray(incoming.selectedStores)
+    ? incoming.selectedStores.map((x) => String(x || "").toUpperCase()).filter(Boolean)
+    : heliosSelectedStores(body);
+
+  const result = await heliosRunMissionStart({
+    stores,
+    objective: incoming.objective || body?.objective || "Find the highest-value compliant commercial opportunity."
+  });
+
+  if (result?.mission) {
+    const oldEvents = Array.isArray(incoming.events) ? incoming.events : [];
+    const generatedEvents = Array.isArray(result.mission.events)
+      ? result.mission.events.filter((e) => e?.type !== "MISSION_STARTED")
+      : [];
+
+    result.mission.id = incoming.id;
+    result.mission.createdAt = incoming.createdAt || result.mission.createdAt;
+    result.mission.version = HELIOS_VERSION;
+    result.mission.events = [
+      ...oldEvents,
+      { at: heliosNow(), type: "MARKET_SCAN_RETRIED" },
+      ...generatedEvents
+    ];
+    result.mission.updatedAt = heliosNow();
+  }
+
+  if (result?.actionCard) {
+    result.actionCard.missionId = incoming.id;
+  }
+
+  return {
+    ...result,
+    retried: true,
+    previousMissionId: incoming.id
   };
 }
 
@@ -6049,6 +6345,46 @@ export default async function handler(
           })
         });
       }
+    }
+
+    if (body.action === "helios_mission_retry_scan") {
+      try {
+        const result = await heliosRetryMissionScan(body);
+        return res.status(result.ok ? 200 : 409).json(result);
+      } catch (error) {
+        return res.status(500).json({
+          error: String(error?.message || error),
+          actionCard: heliosActionCard({
+            severity: "CRITICAL",
+            title: "HELIOS RETRY ERROR",
+            message: "HELIOS non è riuscito a ripetere il Market Scan. Nessun prodotto è stato pubblicato.",
+            reason: String(error?.message || error),
+            missionId: body?.mission?.id || null,
+            actions: [{ id: "RETRY_SCAN", label: "RETRY SCAN", type: "BACKEND" }]
+          })
+        });
+      }
+    }
+
+    if (body.action === "helios_ai_health") {
+      const configured = {
+        gemini: Boolean(process.env.GEMINI_API_KEY),
+        openrouter: Boolean(process.env.OPENROUTER_API_KEY),
+        groq: Boolean(process.env.GROQ_API_KEY)
+      };
+      const probe = await heliosAIJson(
+        'Return exactly this JSON object: {"ok":true,"service":"helios"}',
+        { temperature: 0, maxTokens: 256 }
+      );
+      return res.status(probe.ok ? 200 : 503).json({
+        ok: probe.ok,
+        heliosVersion: HELIOS_VERSION,
+        configured,
+        provider: probe.provider || null,
+        model: probe.model || null,
+        diagnostics: probe.diagnostics || [],
+        error: probe.ok ? null : probe.error
+      });
     }
 
     if (body.action === "helios_mission_status") {
