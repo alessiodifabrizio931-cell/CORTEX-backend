@@ -5050,7 +5050,27 @@ export default async function handler(
   try {
     const body =
       req.body || {};
-
+    // ============================================================
+    // MERCURY — MT5 BRIDGE PING v0.1
+    // Verifica connessione MT5 <-> CORTEX senza inviare ordini.
+    // ============================================================
+    if (body.action === "mercury_mt5_ping") {
+      return res.status(200).json({
+        ok: true,
+        organ: "MERCURY",
+        bridge: "MT5",
+        mode: "DEMO",
+        message: "MERCURY_MT5_BRIDGE_OK",
+        received: {
+          login: body.login || null,
+          server: body.server || null,
+          balance: body.balance ?? null,
+          equity: body.equity ?? null,
+          positions: body.positions ?? null
+        },
+        serverTime: new Date().toISOString()
+      });
+    }
     // ============================================================
     // CORTEX — VOCE (ElevenLabs TTS)
     // ============================================================
