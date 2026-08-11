@@ -4,7 +4,6 @@ import { searchRemotive } from "../services/remotive.js";
 
 const MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash-lite";
 
-function chunkText(t) {
   t = (t || "").toString();
   const out = [];
 
@@ -5126,7 +5125,7 @@ export default async function handler(
     const body =
       req.body || {};
     // ============================================================
-    // MERCURY — CONTROL PLANE v1.0
+    // MERCURY — CONTROL PLANE v1.2
     // MT5 <-> Redis <-> CORTEX
     // DEMO ONLY
     // ============================================================
@@ -5143,13 +5142,15 @@ export default async function handler(
     ];
 
     const mercuryAllowedStrategies = [
-      "SCALP_M1_RR1_FAST"
+      "SCALP_M1_RR1_FAST",
+      "SCALP_M1_RR1_RAPID",
+      "SCALP_M1_RR1_RAPID_EXEC"
     ];
 
     const mercuryDefaultControl = () => ({
       enabled: false,
       mode: "DEMO",
-      strategy: "SCALP_M1_RR1_FAST",
+      strategy: "SCALP_M1_RR1_RAPID_EXEC",
       markets: [...mercuryAllowedMarkets],
       riskPerTradePct: 1,
       maxPositions: 2,
