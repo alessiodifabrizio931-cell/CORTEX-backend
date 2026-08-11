@@ -5071,6 +5071,22 @@ export default async function handler(
         serverTime: new Date().toISOString()
       });
     }
+        // ============================================================
+    // MERCURY — MT5 COMMAND POLL v0.1
+    // MT5 chiede se esiste un comando da eseguire.
+    // Per ora nessun trade viene inviato.
+    // ============================================================
+    if (body.action === "mercury_mt5_poll") {
+      return res.status(200).json({
+        ok: true,
+        organ: "MERCURY",
+        bridge: "MT5",
+        mode: "DEMO",
+        command: null,
+        message: "MERCURY_MT5_POLL_OK",
+        serverTime: new Date().toISOString()
+      });
+    }
     // ============================================================
     // CORTEX — VOCE (ElevenLabs TTS)
     // ============================================================
