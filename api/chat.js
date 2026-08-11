@@ -162,12 +162,58 @@ async function shopifyFetch(
 // La logica resta in api/chat.js come richiesto.
 // ============================================================
 
-const HELIOS_VERSION = "2.8.2";
+const HELIOS_VERSION = "2.8.3";
 const HELIOS_MAX_COLLECTIVE_SEARCH_ATTEMPTS = 3;
 const HELIOS_COLLECTIVE_TAG = "Shopify Collective";
 const HELIOS_DEFAULT_INITIAL_CAPITAL = 5;
 const HELIOS_AUTO_REINVEST_MAX_PCT = 20;
 const HELIOS_THEME_API_VERSION = "2025-10";
+
+const HELIOS_COLLECTIVE_VISION_SCHEMA = {
+  name: "helios_collective_vision",
+  strict: true,
+  schema: {
+    type: "object",
+    properties: {
+      coverage: { type: "string", enum: ["GOOD", "MIXED", "POOR", "EMPTY"] },
+      confidence: { type: "string", enum: ["HIGH", "MEDIUM", "LOW"] },
+      candidates: {
+        type: "array",
+        maxItems: 30,
+        items: {
+          type: "object",
+          properties: {
+            index: { type: "integer", minimum: 0 },
+            title: { type: "string" },
+            supplier: { type: "string" },
+            price: { type: ["number", "null"] },
+            marginPct: { type: ["number", "null"] },
+            instantImport: { type: ["boolean", "null"] },
+            fit: { type: "number", minimum: 0, maximum: 100 },
+            risk: { type: "string", enum: ["LOW", "MEDIUM", "HIGH", "BLOCKED"] },
+            why: { type: "string" }
+          },
+          required: [
+            "index",
+            "title",
+            "supplier",
+            "price",
+            "marginPct",
+            "instantImport",
+            "fit",
+            "risk",
+            "why"
+          ],
+          additionalProperties: false
+        }
+      },
+      recommendedIndex: { type: ["integer", "null"], minimum: 0 },
+      reason: { type: "string" }
+    },
+    required: ["coverage", "confidence", "candidates", "recommendedIndex", "reason"],
+    additionalProperties: false
+  }
+};
 
 function heliosIsCollectiveProduct(product) {
   return (product?.tags || []).some(
@@ -1212,7 +1258,29 @@ async function heliosAIJsonWithImage(
   }
 
   const diagnostics = [];
+  const normalizedMediaType = mediaType || "image/png";
+  const imageUrl = `data:${normalizedMediaType};base64,${image}`;
+  const compactPrompt = String(prompt || "").slice(0, 16000);
 
+  const parseOpenAICompatibleContent = (payload) => {
+    const raw = payload?.choices?.[0]?.message?.content;
+    const content = Array.isArray(raw)
+      ? raw.map((x) => x?.text || x?.content || "").join("")
+      : String(raw || "");
+    return { content, parsed: heliosSafeJson(content) };
+  };
+
+  const pushDiagnostic = ({ provider, model, status = null, error, attempt = null }) => {
+    diagnostics.push({
+      provider,
+      model: model || null,
+      status,
+      error: String(error || "UNKNOWN").slice(0, 500),
+      ...(attempt ? { attempt } : {})
+    });
+  };
+
+  // PROVIDER 1 — GEMINI VISION
   const geminiKey = process.env.GEMINI_API_KEY;
   if (geminiKey) {
     try {
@@ -1226,10 +1294,10 @@ async function heliosAIJsonWithImage(
               {
                 role: "user",
                 parts: [
-                  { text: prompt },
+                  { text: compactPrompt },
                   {
                     inline_data: {
-                      mime_type: mediaType || "image/png",
+                      mime_type: normalizedMediaType,
                       data: image
                     }
                   }
@@ -1238,7 +1306,7 @@ async function heliosAIJsonWithImage(
             ],
             generationConfig: {
               temperature,
-              maxOutputTokens: maxTokens,
+              maxOutputTokens: Math.min(maxTokens, 1600),
               responseMimeType: "application/json"
             }
           })
@@ -1252,126 +1320,236 @@ async function heliosAIJsonWithImage(
           .join("")
           .trim();
         const parsed = heliosSafeJson(raw);
-        if (parsed) return { ok: true, provider: "gemini", model: MODEL, data: parsed, diagnostics };
-        diagnostics.push({ provider: "gemini", model: MODEL, status: r.status, error: raw ? "INVALID_JSON_OUTPUT" : "EMPTY_OUTPUT" });
+        if (parsed) {
+          return {
+            ok: true,
+            provider: "gemini",
+            model: MODEL,
+            data: parsed,
+            diagnostics,
+            fallbackUsed: false
+          };
+        }
+        pushDiagnostic({
+          provider: "gemini",
+          model: MODEL,
+          status: r.status,
+          error: raw ? "INVALID_JSON_OUTPUT" : "EMPTY_OUTPUT"
+        });
       } else {
-        diagnostics.push({ provider: "gemini", model: MODEL, status: r.status, error: String(d?.error?.message || `HTTP ${r.status}`).slice(0, 500) });
+        pushDiagnostic({
+          provider: "gemini",
+          model: MODEL,
+          status: r.status,
+          error: d?.error?.message || `HTTP ${r.status}`
+        });
       }
     } catch (error) {
-      diagnostics.push({ provider: "gemini", model: MODEL, status: null, error: String(error?.message || error).slice(0, 500) });
+      pushDiagnostic({
+        provider: "gemini",
+        model: MODEL,
+        error: error?.message || error
+      });
     }
   } else {
     diagnostics.push({ provider: "gemini", configured: false, error: "GEMINI_API_KEY_MISSING" });
   }
 
+  // PROVIDER 2 — OPENROUTER VISION
+  // First try strict Structured Outputs. require_parameters prevents routing to
+  // an endpoint that silently ignores json_schema.
   const orKey = process.env.OPENROUTER_API_KEY;
   if (orKey) {
-    try {
-      const orVisionModel = process.env.OPENROUTER_VISION_MODEL || process.env.OPENROUTER_MODEL || "openrouter/free";
-      const r = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${orKey}`,
-          "HTTP-Referer": process.env.CORTEX_PUBLIC_URL || "https://cortex.local",
-          "X-Title": "CORTEX HELIOS Collective Vision"
-        },
-        body: JSON.stringify({
-          model: orVisionModel,
-          messages: [
-            {
-              role: "user",
-              content: [
-                { type: "text", text: `${prompt}\nReturn only a valid JSON object.` },
-                {
-                  type: "image_url",
-                  image_url: { url: `data:${mediaType || "image/png"};base64,${image}` }
-                }
-              ]
-            }
-          ],
-          temperature,
-          max_tokens: maxTokens,
-          stream: false
-        })
-      });
-      const rawBody = await r.text();
-      const d = heliosSafeJson(rawBody, {}) || {};
-      if (r.ok) {
-        const raw = d?.choices?.[0]?.message?.content;
-        const content = Array.isArray(raw)
-          ? raw.map((x) => x?.text || x?.content || "").join("")
-          : String(raw || "");
-        const parsed = heliosSafeJson(content);
-        if (parsed) return { ok: true, provider: "openrouter", model: d?.model || orVisionModel, data: parsed, diagnostics };
-        diagnostics.push({ provider: "openrouter", model: d?.model || orVisionModel, status: r.status, error: content ? "INVALID_JSON_OUTPUT" : "EMPTY_OUTPUT" });
-      } else {
-        diagnostics.push({ provider: "openrouter", model: orVisionModel, status: r.status, error: String(d?.error?.message || d?.message || `HTTP ${r.status}`).slice(0, 500) });
+    const orVisionModel = process.env.OPENROUTER_VISION_MODEL || process.env.OPENROUTER_MODEL || "openrouter/free";
+    const baseMessages = [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: compactPrompt },
+          { type: "image_url", image_url: { url: imageUrl } }
+        ]
       }
-    } catch (error) {
-      diagnostics.push({ provider: "openrouter", model: process.env.OPENROUTER_VISION_MODEL || process.env.OPENROUTER_MODEL || "openrouter/free", status: null, error: String(error?.message || error).slice(0, 500) });
+    ];
+
+    const openRouterAttempts = [
+      {
+        name: "structured",
+        extra: {
+          response_format: {
+            type: "json_schema",
+            json_schema: HELIOS_COLLECTIVE_VISION_SCHEMA
+          },
+          provider: { require_parameters: true }
+        }
+      },
+      {
+        name: "json_object",
+        extra: {
+          response_format: { type: "json_object" }
+        }
+      },
+      {
+        name: "parser_fallback",
+        extra: {}
+      }
+    ];
+
+    for (const attempt of openRouterAttempts) {
+      try {
+        const r = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${orKey}`,
+            "HTTP-Referer": process.env.CORTEX_PUBLIC_URL || "https://cortex.local",
+            "X-Title": "CORTEX HELIOS Collective Vision"
+          },
+          body: JSON.stringify({
+            model: orVisionModel,
+            messages: baseMessages,
+            temperature,
+            max_tokens: Math.min(maxTokens, 1400),
+            stream: false,
+            ...attempt.extra
+          })
+        });
+        const rawBody = await r.text();
+        const d = heliosSafeJson(rawBody, {}) || {};
+        if (r.ok) {
+          const { content, parsed } = parseOpenAICompatibleContent(d);
+          if (parsed) {
+            return {
+              ok: true,
+              provider: "openrouter",
+              model: d?.model || orVisionModel,
+              data: parsed,
+              diagnostics,
+              fallbackUsed: true,
+              providerAttempt: attempt.name
+            };
+          }
+          pushDiagnostic({
+            provider: "openrouter",
+            model: d?.model || orVisionModel,
+            status: r.status,
+            error: content ? "INVALID_JSON_OUTPUT" : "EMPTY_OUTPUT",
+            attempt: attempt.name
+          });
+        } else {
+          pushDiagnostic({
+            provider: "openrouter",
+            model: orVisionModel,
+            status: r.status,
+            error: d?.error?.message || d?.message || `HTTP ${r.status}`,
+            attempt: attempt.name
+          });
+        }
+      } catch (error) {
+        pushDiagnostic({
+          provider: "openrouter",
+          model: orVisionModel,
+          error: error?.message || error,
+          attempt: attempt.name
+        });
+      }
     }
   } else {
     diagnostics.push({ provider: "openrouter", configured: false, error: "OPENROUTER_API_KEY_MISSING" });
   }
 
-  // Groq vision fallback. qwen/qwen3.6-27b supports image input and JSON mode.
+  // PROVIDER 3 — GROQ VISION (Qwen 3.6 27B)
+  // Qwen supports image input + JSON Object Mode. reasoning_effort:none keeps
+  // the multimodal request compact. If JSON mode itself triggers failed_generation,
+  // retry once without response_format and parse the first valid JSON object locally.
   const groqKey = process.env.GROQ_API_KEY;
   if (groqKey) {
-    try {
-      const groqVisionModel = process.env.GROQ_VISION_MODEL || "qwen/qwen3.6-27b";
-      const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${groqKey}`
-        },
-        body: JSON.stringify({
-          model: groqVisionModel,
-          messages: [
-            {
-              role: "user",
-              content: [
-                { type: "text", text: `${prompt}\nReturn only a valid JSON object.` },
-                {
-                  type: "image_url",
-                  image_url: { url: `data:${mediaType || "image/png"};base64,${image}` }
-                }
-              ]
-            }
-          ],
-          temperature,
-          // Keep the total multimodal request below low-tier TPM limits.
-          // Screenshot ranking needs a compact JSON, not thousands of output tokens.
-          max_tokens: Math.min(maxTokens, 1200),
-          response_format: { type: "json_object" },
-          stream: false
-        })
-      });
-      const rawBody = await r.text();
-      const d = heliosSafeJson(rawBody, {}) || {};
-      if (r.ok) {
-        const raw = d?.choices?.[0]?.message?.content;
-        const content = Array.isArray(raw)
-          ? raw.map((x) => x?.text || x?.content || "").join("")
-          : String(raw || "");
-        const parsed = heliosSafeJson(content);
-        if (parsed) return { ok: true, provider: "groq", model: d?.model || groqVisionModel, data: parsed, diagnostics };
-        diagnostics.push({ provider: "groq", model: d?.model || groqVisionModel, status: r.status, error: content ? "INVALID_JSON_OUTPUT" : "EMPTY_OUTPUT" });
-      } else {
-        diagnostics.push({ provider: "groq", model: groqVisionModel, status: r.status, error: String(d?.error?.message || d?.message || `HTTP ${r.status}`).slice(0, 500) });
+    const groqVisionModel = process.env.GROQ_VISION_MODEL || "qwen/qwen3.6-27b";
+    const groqMessages = [
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: `${compactPrompt}\nReturn exactly one valid JSON object. Do not add markdown or commentary.`
+          },
+          { type: "image_url", image_url: { url: imageUrl } }
+        ]
       }
-    } catch (error) {
-      diagnostics.push({ provider: "groq", model: process.env.GROQ_VISION_MODEL || "qwen/qwen3.6-27b", status: null, error: String(error?.message || error).slice(0, 500) });
+    ];
+
+    const groqAttempts = [
+      { name: "json_object", responseFormat: { type: "json_object" } },
+      { name: "parser_fallback", responseFormat: null }
+    ];
+
+    for (const attempt of groqAttempts) {
+      try {
+        const payload = {
+          model: groqVisionModel,
+          messages: groqMessages,
+          temperature,
+          max_completion_tokens: Math.min(maxTokens, 1200),
+          reasoning_effort: "none",
+          stream: false
+        };
+        if (attempt.responseFormat) payload.response_format = attempt.responseFormat;
+
+        const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${groqKey}`
+          },
+          body: JSON.stringify(payload)
+        });
+        const rawBody = await r.text();
+        const d = heliosSafeJson(rawBody, {}) || {};
+        if (r.ok) {
+          const { content, parsed } = parseOpenAICompatibleContent(d);
+          if (parsed) {
+            return {
+              ok: true,
+              provider: "groq",
+              model: d?.model || groqVisionModel,
+              data: parsed,
+              diagnostics,
+              fallbackUsed: true,
+              providerAttempt: attempt.name
+            };
+          }
+          pushDiagnostic({
+            provider: "groq",
+            model: d?.model || groqVisionModel,
+            status: r.status,
+            error: content ? "INVALID_JSON_OUTPUT" : "EMPTY_OUTPUT",
+            attempt: attempt.name
+          });
+        } else {
+          pushDiagnostic({
+            provider: "groq",
+            model: groqVisionModel,
+            status: r.status,
+            error: d?.error?.message || d?.message || `HTTP ${r.status}`,
+            attempt: attempt.name
+          });
+        }
+      } catch (error) {
+        pushDiagnostic({
+          provider: "groq",
+          model: groqVisionModel,
+          error: error?.message || error,
+          attempt: attempt.name
+        });
+      }
     }
   } else {
     diagnostics.push({ provider: "groq", configured: false, error: "GROQ_API_KEY_MISSING" });
   }
 
   const summary = diagnostics
-    .map((x) => `${x.provider}:${x.status ?? "NA"}:${x.error || "UNKNOWN"}`)
+    .map((x) => `${x.provider}${x.attempt ? `/${x.attempt}` : ""}:${x.status ?? "NA"}:${x.error || "UNKNOWN"}`)
     .join(" | ")
-    .slice(0, 1400);
+    .slice(0, 1800);
 
   return {
     ok: false,
@@ -1380,7 +1558,6 @@ async function heliosAIJsonWithImage(
     diagnostics
   };
 }
-
 
 function heliosMissionOpportunityList(mission) {
   return (Array.isArray(mission?.marketScan?.opportunities)
@@ -1731,6 +1908,10 @@ FORMATO:
         message: "HELIOS non è riuscito ad analizzare lo screenshot. Nessun prodotto è stato selezionato o pubblicato.",
         reason: ai.error,
         missionId: mission.id,
+        details: {
+          providerChain: ["gemini", "openrouter", "groq"],
+          diagnostics: ai.diagnostics || []
+        },
         actions: [
           { id: "ANALYZE_COLLECTIVE_RESULTS", label: "RETRY SCREENSHOT", type: "LOCAL" },
           { id: "NEXT_SEARCH", label: "NEXT SEARCH", type: "BACKEND" }
@@ -1771,7 +1952,11 @@ FORMATO:
     query: plan.query,
     coverage: raw.coverage || null,
     confidence: raw.confidence || null,
-    candidateCount: candidates.length
+    candidateCount: candidates.length,
+    provider: ai.provider || null,
+    model: ai.model || null,
+    fallbackUsed: Boolean(ai.fallbackUsed),
+    providerAttempt: ai.providerAttempt || null
   };
   mission.updatedAt = heliosNow();
   mission.events = [
@@ -1783,7 +1968,11 @@ FORMATO:
       query: plan.query,
       coverage: raw.coverage || null,
       candidateCount: candidates.length,
-      recommended: recommended?.title || null
+      recommended: recommended?.title || null,
+      provider: ai.provider || null,
+      model: ai.model || null,
+      fallbackUsed: Boolean(ai.fallbackUsed),
+      providerAttempt: ai.providerAttempt || null
     }
   ];
 
@@ -1814,6 +2003,7 @@ FORMATO:
       ok: true,
       mission,
       provider: ai.provider,
+      model: ai.model || null,
       analysis: {
         coverage: raw.coverage || "MIXED",
         confidence: raw.confidence || "MEDIUM",
@@ -1851,6 +2041,7 @@ FORMATO:
   return {
     ...advanced,
     provider: ai.provider,
+    model: ai.model || null,
     analysis: {
       coverage: raw.coverage || "POOR",
       confidence: raw.confidence || "MEDIUM",
@@ -7050,6 +7241,26 @@ export default async function handler(
         'Return exactly this JSON object: {"ok":true,"service":"helios"}',
         { temperature: 0, maxTokens: 256 }
       );
+
+      const providerStatus = {
+        gemini: configured.gemini ? "UNTESTED" : "UNAVAILABLE",
+        openrouter: configured.openrouter ? "UNTESTED" : "UNAVAILABLE",
+        groq: configured.groq ? "UNTESTED" : "UNAVAILABLE"
+      };
+      for (const d of probe.diagnostics || []) {
+        if (!d?.provider || !(d.provider in providerStatus)) continue;
+        providerStatus[d.provider] = d.configured === false ? "UNAVAILABLE" : "DEGRADED";
+      }
+      if (probe.ok && probe.provider && probe.provider in providerStatus) {
+        providerStatus[probe.provider] = "AVAILABLE";
+      }
+
+      const visionConfigured = {
+        gemini: configured.gemini,
+        openrouter: configured.openrouter,
+        groq: configured.groq
+      };
+
       return res.status(probe.ok ? 200 : 503).json({
         ok: probe.ok,
         heliosVersion: HELIOS_VERSION,
@@ -7057,6 +7268,20 @@ export default async function handler(
         provider: probe.provider || null,
         model: probe.model || null,
         diagnostics: probe.diagnostics || [],
+        providerStatus,
+        json: {
+          ok: probe.ok,
+          chain: ["gemini", "openrouter", "groq"],
+          provider: probe.provider || null,
+          model: probe.model || null
+        },
+        vision: {
+          chain: ["gemini", "openrouter", "groq"],
+          configured: visionConfigured,
+          openrouterModel: process.env.OPENROUTER_VISION_MODEL || process.env.OPENROUTER_MODEL || "openrouter/free",
+          groqModel: process.env.GROQ_VISION_MODEL || "qwen/qwen3.6-27b",
+          note: "Vision viene verificata realmente durante l'analisi screenshot; un errore Gemini non blocca HELIOS se un fallback riesce."
+        },
         error: probe.ok ? null : probe.error
       });
     }
