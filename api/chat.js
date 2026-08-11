@@ -5158,6 +5158,10 @@ export default async function handler(
       dailyLossLimitPct: 4,
       maxDrawdownPct: 10,
       riskReward: 1,
+      riskResetSeq: 0,
+      riskResetType: null,
+      riskResetRequestedAt: null,
+      riskResetHistory: [],
       updatedAt: new Date().toISOString()
     });
 
@@ -5294,6 +5298,10 @@ export default async function handler(
           positions: mercuryNumber(body.positions, 0),
           dailyLossPct: mercuryNumber(body.dailyLossPct, 0),
           drawdownPct: mercuryNumber(body.drawdownPct, 0),
+          dailyEquityBaseline: mercuryNumber(body.dailyEquityBaseline, null),
+          peakEquityBaseline: mercuryNumber(body.peakEquityBaseline, null),
+          riskResetSeqApplied: mercuryNumber(body.riskResetSeqApplied, 0),
+          hardRiskReason: mercuryString(body.hardRiskReason, 60),
           executionEnabled: mercuryBool(body.executionEnabled, false),
           terminalTradeAllowed: mercuryBool(body.terminalTradeAllowed, false),
           scanner,
@@ -5369,6 +5377,84 @@ export default async function handler(
         return res.status(500).json({
           ok: false,
           error: "MERCURY_STATE_FAILED",
+          detail: String(error?.message || error).slice(0, 300)
+        });
+      }
+    }
+
+    // ============================================================
+    // MERCURY — OWNER RISK RESET v1.0
+    // DEMO ONLY. Resetta i baseline del bridge, NON cancella lo storico
+    // economico del conto e forza CONTROL=STOP finché l'owner non riavvia.
+    // resetType: DAILY | DRAWDOWN | ALL
+    // ============================================================
+    if (body.action === "mercury_risk_reset") {
+      try {
+        const resetType = String(body.resetType || "")
+          .trim()
+          .toUpperCase();
+
+        if (!["DAILY", "DRAWDOWN", "ALL"].includes(resetType)) {
+          return res.status(400).json({
+            ok: false,
+            error: "MERCURY_RISK_RESET_TYPE_INVALID"
+          });
+        }
+
+        const state = await mercuryRedisGet(MERCURY_STATE_KEY);
+        if (state?.mode && String(state.mode).toUpperCase() !== "DEMO") {
+          return res.status(403).json({
+            ok: false,
+            error: "MERCURY_RISK_RESET_DEMO_ONLY"
+          });
+        }
+
+        const current = await mercuryGetOrCreateControl();
+        const now = new Date().toISOString();
+        const seq = Math.max(0, Math.floor(Number(current.riskResetSeq) || 0)) + 1;
+        const history = Array.isArray(current.riskResetHistory)
+          ? current.riskResetHistory.slice(-9)
+          : [];
+
+        const audit = {
+          seq,
+          type: resetType,
+          requestedAt: now,
+          requestedBy: "OWNER",
+          account: state?.login || null,
+          balance: mercuryNumber(state?.balance, null),
+          equity: mercuryNumber(state?.equity, null),
+          dailyLossPctBefore: mercuryNumber(state?.dailyLossPct, null),
+          drawdownPctBefore: mercuryNumber(state?.drawdownPct, null)
+        };
+
+        const next = {
+          ...current,
+          enabled: false,
+          mode: "DEMO",
+          riskResetSeq: seq,
+          riskResetType: resetType,
+          riskResetRequestedAt: now,
+          riskResetHistory: [...history, audit],
+          updatedAt: now
+        };
+
+        await mercuryRedisSet(MERCURY_CONTROL_KEY, next);
+
+        return res.status(200).json({
+          ok: true,
+          organ: "MERCURY",
+          message: "MERCURY_RISK_RESET_QUEUED",
+          reset: audit,
+          control: next,
+          note: "Reset inviato al bridge. Trading remoto resta STOP finché l'owner non preme START.",
+          serverTime: now
+        });
+      } catch (error) {
+        console.error("MERCURY RISK RESET ERROR", error);
+        return res.status(500).json({
+          ok: false,
+          error: "MERCURY_RISK_RESET_FAILED",
           detail: String(error?.message || error).slice(0, 300)
         });
       }
