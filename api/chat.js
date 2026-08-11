@@ -162,8 +162,9 @@ async function shopifyFetch(
 // La logica resta in api/chat.js come richiesto.
 // ============================================================
 
-const HELIOS_VERSION = "2.8.3";
+const HELIOS_VERSION = "2.8.4";
 const HELIOS_MAX_COLLECTIVE_SEARCH_ATTEMPTS = 3;
+const HELIOS_MIN_VISIBLE_MARGIN_PCT = 15;
 const HELIOS_COLLECTIVE_TAG = "Shopify Collective";
 const HELIOS_DEFAULT_INITIAL_CAPITAL = 5;
 const HELIOS_AUTO_REINVEST_MAX_PCT = 20;
@@ -1866,7 +1867,9 @@ REGOLE:
 - Se il requisito eco/biodegradabile/reusable non è dimostrabile dal titolo/packaging visibile, non inventarlo: abbassa confidence e fit.
 - Preferisci Instant Import quando visibile.
 - Non scegliere un prodotto con fit < 65.
-- Se nessun prodotto è abbastanza coerente, recommendedIndex deve essere null.
+- Se il margine percentuale è VISIBILE e inferiore al ${HELIOS_MIN_VISIBLE_MARGIN_PCT}%, NON scegliere quel prodotto, anche se il fit è alto.
+- Se il margine non è visibile, non inventarlo: puoi ancora valutare il prodotto, ma abbassa confidence.
+- Se nessun prodotto supera insieme coerenza, rischio e margine minimo visibile, recommendedIndex deve essere null.
 - Restituisci SOLO JSON.
 
 FORMATO:
@@ -1976,10 +1979,15 @@ FORMATO:
     }
   ];
 
+  const visibleMarginPass =
+    recommended?.marginPct == null ||
+    Number(recommended.marginPct) >= HELIOS_MIN_VISIBLE_MARGIN_PCT;
+
   if (
     recommended &&
     recommended.fit >= 65 &&
-    recommended.risk !== "BLOCKED"
+    recommended.risk !== "BLOCKED" &&
+    visibleMarginPass
   ) {
     shopPipe.status = "WAITING";
     shopPipe.step = "OWNER_IMPORT_RECOMMENDED_PRODUCT";
@@ -2037,7 +2045,14 @@ FORMATO:
     };
   }
 
-  const advanced = heliosMissionNextSearch(mission, "NO_VALID_VISIBLE_COLLECTIVE_RESULT");
+  const rejectReason =
+    recommended &&
+    recommended.marginPct != null &&
+    Number(recommended.marginPct) < HELIOS_MIN_VISIBLE_MARGIN_PCT
+      ? "VISIBLE_MARGIN_BELOW_MINIMUM"
+      : "NO_VALID_VISIBLE_COLLECTIVE_RESULT";
+
+  const advanced = heliosMissionNextSearch(mission, rejectReason);
   return {
     ...advanced,
     provider: ai.provider,
@@ -2047,7 +2062,10 @@ FORMATO:
       confidence: raw.confidence || "MEDIUM",
       candidates,
       recommended: null,
-      reason: String(raw.reason || "Nessun risultato visibile supera il fit minimo HELIOS.").slice(0, 600)
+      reason:
+        rejectReason === "VISIBLE_MARGIN_BELOW_MINIMUM"
+          ? `Il candidato migliore ha un margine visibile inferiore al ${HELIOS_MIN_VISIBLE_MARGIN_PCT}% e non viene importato.`
+          : String(raw.reason || "Nessun risultato visibile supera i criteri minimi HELIOS.").slice(0, 600)
     },
     autoAdvanced: true
   };
