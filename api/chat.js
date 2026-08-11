@@ -5082,7 +5082,12 @@ export default async function handler(
         organ: "MERCURY",
         bridge: "MT5",
         mode: "DEMO",
-        command: null,
+        command: {
+  id: 2026081101,
+  action: "BUY",
+  symbol: "EURUSD",
+  volume: 0.01
+},
         message: "MERCURY_MT5_POLL_OK",
         serverTime: new Date().toISOString()
       });
