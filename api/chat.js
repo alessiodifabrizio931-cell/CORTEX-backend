@@ -4,6 +4,7 @@ import { searchRemotive } from "../services/remotive.js";
 
 const MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash-lite";
 
+function chunkText(t) {
   t = (t || "").toString();
   const out = [];
 
