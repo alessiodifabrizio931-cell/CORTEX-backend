@@ -5126,42 +5126,408 @@ export default async function handler(
     const body =
       req.body || {};
     // ============================================================
-    // MERCURY — MT5 BRIDGE PING v0.1
-    // Verifica connessione MT5 <-> CORTEX senza inviare ordini.
+    // MERCURY — CONTROL PLANE v1.0
+    // MT5 <-> Redis <-> CORTEX
+    // DEMO ONLY
+    // ============================================================
+
+    const MERCURY_STATE_KEY = "mercury:state:v1";
+    const MERCURY_CONTROL_KEY = "mercury:control:v1";
+
+    const mercuryAllowedMarkets = [
+      "EURUSD",
+      "GBPUSD",
+      "XAUUSD",
+      "NQ",
+      "SP500"
+    ];
+
+    const mercuryAllowedStrategies = [
+      "SCALP_M1_RR1_FAST"
+    ];
+
+    const mercuryDefaultControl = () => ({
+      enabled: false,
+      mode: "DEMO",
+      strategy: "SCALP_M1_RR1_FAST",
+      markets: [...mercuryAllowedMarkets],
+      riskPerTradePct: 1,
+      maxPositions: 2,
+      dailyLossLimitPct: 4,
+      maxDrawdownPct: 10,
+      riskReward: 1,
+      updatedAt: new Date().toISOString()
+    });
+
+    const mercuryNumber = (value, fallback = null) => {
+      const n = Number(value);
+      return Number.isFinite(n) ? n : fallback;
+    };
+
+    const mercuryString = (value, max = 120) => {
+      if (value === undefined || value === null) return null;
+      return String(value).trim().slice(0, max);
+    };
+
+    const mercuryBool = (value, fallback = false) => {
+      if (typeof value === "boolean") return value;
+      if (value === 1 || value === "1" || value === "true") return true;
+      if (value === 0 || value === "0" || value === "false") return false;
+      return fallback;
+    };
+
+    async function mercuryGetOrCreateControl() {
+      let control = await mercuryRedisGet(MERCURY_CONTROL_KEY);
+      if (!control || typeof control !== "object") {
+        control = mercuryDefaultControl();
+        await mercuryRedisSet(MERCURY_CONTROL_KEY, control);
+      }
+      return control;
+    }
+
+    // ============================================================
+    // MERCURY — MT5 PING
+    // Compatibilità con MercuryBridge già installato.
+    // Salva lo stato base del conto in Redis.
     // ============================================================
     if (body.action === "mercury_mt5_ping") {
-      return res.status(200).json({
-        ok: true,
-        organ: "MERCURY",
-        bridge: "MT5",
-        mode: "DEMO",
-        message: "MERCURY_MT5_BRIDGE_OK",
-        received: {
-          login: body.login || null,
-          server: body.server || null,
-          balance: body.balance ?? null,
-          equity: body.equity ?? null,
-          positions: body.positions ?? null
-        },
-        serverTime: new Date().toISOString()
-      });
+      try {
+        const previousState =
+          (await mercuryRedisGet(MERCURY_STATE_KEY)) || {};
+
+        const state = {
+          ...previousState,
+          organ: "MERCURY",
+          bridge: "MT5",
+          mode: "DEMO",
+          login: mercuryString(body.login, 40),
+          server: mercuryString(body.server, 100),
+          balance: mercuryNumber(body.balance, previousState.balance ?? null),
+          equity: mercuryNumber(body.equity, previousState.equity ?? null),
+          positions: mercuryNumber(body.positions, previousState.positions ?? 0),
+          lastSeen: new Date().toISOString()
+        };
+
+        await mercuryRedisSet(MERCURY_STATE_KEY, state);
+        const control = await mercuryGetOrCreateControl();
+
+        return res.status(200).json({
+          ok: true,
+          organ: "MERCURY",
+          bridge: "MT5",
+          mode: "DEMO",
+          message: "MERCURY_MT5_BRIDGE_OK",
+          control,
+          received: {
+            login: state.login,
+            server: state.server,
+            balance: state.balance,
+            equity: state.equity,
+            positions: state.positions
+          },
+          serverTime: new Date().toISOString()
+        });
+      } catch (error) {
+        console.error("MERCURY PING REDIS ERROR", error);
+        return res.status(500).json({
+          ok: false,
+          organ: "MERCURY",
+          error: "MERCURY_REDIS_ERROR",
+          detail: String(error?.message || error).slice(0, 300)
+        });
+      }
     }
-        // ============================================================
-    // MERCURY — MT5 COMMAND POLL v0.1
-    // MT5 chiede se esiste un comando da eseguire.
-    // Per ora nessun trade viene inviato.
+
+    // ============================================================
+    // MERCURY — MT5 FULL SYNC
+    // La prossima versione dell'EA invierà stato completo,
+    // scanner e posizioni aperte. Il backend restituisce CONTROL.
+    // ============================================================
+    if (body.action === "mercury_mt5_sync") {
+      try {
+        if (body.mode && String(body.mode).toUpperCase() !== "DEMO") {
+          return res.status(403).json({
+            ok: false,
+            error: "MERCURY_DEMO_ONLY"
+          });
+        }
+
+        const scanner = Array.isArray(body.scanner)
+          ? body.scanner.slice(0, 10).map((item) => ({
+              market: mercuryString(item?.market, 20),
+              symbol: mercuryString(item?.symbol, 30),
+              status: mercuryString(item?.status, 40),
+              reason: mercuryString(item?.reason, 100),
+              direction: mercuryString(item?.direction, 10),
+              strategy: mercuryString(item?.strategy, 60),
+              score: mercuryNumber(item?.score, null)
+            }))
+          : [];
+
+        const openPositions = Array.isArray(body.openPositions)
+          ? body.openPositions.slice(0, 2).map((p) => ({
+              symbol: mercuryString(p?.symbol, 30),
+              market: mercuryString(p?.market, 20),
+              direction: mercuryString(p?.direction, 10),
+              volume: mercuryNumber(p?.volume, null),
+              entry: mercuryNumber(p?.entry, null),
+              sl: mercuryNumber(p?.sl, null),
+              tp: mercuryNumber(p?.tp, null),
+              profit: mercuryNumber(p?.profit, 0),
+              magic: mercuryNumber(p?.magic, null)
+            }))
+          : [];
+
+        const state = {
+          organ: "MERCURY",
+          bridge: "MT5",
+          mode: "DEMO",
+          bridgeVersion: mercuryString(body.bridgeVersion, 30),
+          strategy: mercuryString(body.strategy, 80),
+          login: mercuryString(body.login, 40),
+          server: mercuryString(body.server, 100),
+          balance: mercuryNumber(body.balance, null),
+          equity: mercuryNumber(body.equity, null),
+          profit: mercuryNumber(body.profit, null),
+          positions: mercuryNumber(body.positions, 0),
+          dailyLossPct: mercuryNumber(body.dailyLossPct, 0),
+          drawdownPct: mercuryNumber(body.drawdownPct, 0),
+          executionEnabled: mercuryBool(body.executionEnabled, false),
+          terminalTradeAllowed: mercuryBool(body.terminalTradeAllowed, false),
+          scanner,
+          openPositions,
+          lastEvent:
+            body.lastEvent && typeof body.lastEvent === "object"
+              ? {
+                  type: mercuryString(body.lastEvent.type, 40),
+                  market: mercuryString(body.lastEvent.market, 20),
+                  direction: mercuryString(body.lastEvent.direction, 10),
+                  message: mercuryString(body.lastEvent.message, 200),
+                  at: mercuryString(body.lastEvent.at, 50)
+                }
+              : null,
+          lastSeen: new Date().toISOString()
+        };
+
+        await mercuryRedisSet(MERCURY_STATE_KEY, state);
+        const control = await mercuryGetOrCreateControl();
+
+        return res.status(200).json({
+          ok: true,
+          organ: "MERCURY",
+          bridge: "MT5",
+          mode: "DEMO",
+          control,
+          serverTime: new Date().toISOString()
+        });
+      } catch (error) {
+        console.error("MERCURY MT5 SYNC ERROR", error);
+        return res.status(500).json({
+          ok: false,
+          error: "MERCURY_MT5_SYNC_FAILED",
+          detail: String(error?.message || error).slice(0, 300)
+        });
+      }
+    }
+
+    // ============================================================
+    // MERCURY — STATE
+    // CORTEX frontend legge qui lo stato persistente.
+    // ============================================================
+    if (body.action === "mercury_state") {
+      try {
+        const state = await mercuryRedisGet(MERCURY_STATE_KEY);
+        const control = await mercuryGetOrCreateControl();
+
+        let online = false;
+        let ageSeconds = null;
+
+        if (state?.lastSeen) {
+          const lastSeenMs = new Date(state.lastSeen).getTime();
+          if (Number.isFinite(lastSeenMs)) {
+            ageSeconds = Math.max(
+              0,
+              Math.floor((Date.now() - lastSeenMs) / 1000)
+            );
+            online = ageSeconds <= 45;
+          }
+        }
+
+        return res.status(200).json({
+          ok: true,
+          organ: "MERCURY",
+          online,
+          ageSeconds,
+          state: state || null,
+          control,
+          serverTime: new Date().toISOString()
+        });
+      } catch (error) {
+        console.error("MERCURY STATE ERROR", error);
+        return res.status(500).json({
+          ok: false,
+          error: "MERCURY_STATE_FAILED",
+          detail: String(error?.message || error).slice(0, 300)
+        });
+      }
+    }
+
+    // ============================================================
+    // MERCURY — CONTROL
+    // START/STOP + parametri autorizzati.
+    // HARD CAPS SERVER-SIDE:
+    // risk <= 1%, positions <= 2, daily loss <= 4%, DD <= 10%, RR 1:1
+    // ============================================================
+    if (body.action === "mercury_control") {
+      try {
+        const current = await mercuryGetOrCreateControl();
+        const next = { ...current };
+
+        if (typeof body.enabled === "boolean") {
+          next.enabled = body.enabled;
+        }
+
+        if (body.strategy !== undefined) {
+          const requestedStrategy = String(body.strategy)
+            .trim()
+            .toUpperCase();
+
+          if (!mercuryAllowedStrategies.includes(requestedStrategy)) {
+            return res.status(400).json({
+              ok: false,
+              error: "MERCURY_STRATEGY_NOT_ALLOWED"
+            });
+          }
+
+          next.strategy = requestedStrategy;
+        }
+
+        if (body.markets !== undefined) {
+          if (!Array.isArray(body.markets)) {
+            return res.status(400).json({
+              ok: false,
+              error: "MERCURY_MARKETS_INVALID"
+            });
+          }
+
+          const cleanMarkets = [
+            ...new Set(
+              body.markets
+                .map((x) => String(x).trim().toUpperCase())
+                .filter((x) => mercuryAllowedMarkets.includes(x))
+            )
+          ];
+
+          if (cleanMarkets.length === 0) {
+            return res.status(400).json({
+              ok: false,
+              error: "MERCURY_NO_VALID_MARKETS"
+            });
+          }
+
+          next.markets = cleanMarkets;
+        }
+
+        if (body.riskPerTradePct !== undefined) {
+          const risk = Number(body.riskPerTradePct);
+          if (!Number.isFinite(risk) || risk <= 0 || risk > 1) {
+            return res.status(400).json({
+              ok: false,
+              error: "MERCURY_RISK_OUT_OF_RANGE",
+              max: 1
+            });
+          }
+          next.riskPerTradePct = risk;
+        }
+
+        if (body.maxPositions !== undefined) {
+          const positions = Math.floor(Number(body.maxPositions));
+          if (!Number.isFinite(positions) || positions < 1 || positions > 2) {
+            return res.status(400).json({
+              ok: false,
+              error: "MERCURY_MAX_POSITIONS_OUT_OF_RANGE",
+              max: 2
+            });
+          }
+          next.maxPositions = positions;
+        }
+
+        if (body.dailyLossLimitPct !== undefined) {
+          const daily = Number(body.dailyLossLimitPct);
+          if (!Number.isFinite(daily) || daily <= 0 || daily > 4) {
+            return res.status(400).json({
+              ok: false,
+              error: "MERCURY_DAILY_LOSS_OUT_OF_RANGE",
+              max: 4
+            });
+          }
+          next.dailyLossLimitPct = daily;
+        }
+
+        if (body.maxDrawdownPct !== undefined) {
+          const dd = Number(body.maxDrawdownPct);
+          if (!Number.isFinite(dd) || dd <= 0 || dd > 10) {
+            return res.status(400).json({
+              ok: false,
+              error: "MERCURY_DRAWDOWN_OUT_OF_RANGE",
+              max: 10
+            });
+          }
+          next.maxDrawdownPct = dd;
+        }
+
+        next.riskReward = 1;
+        next.mode = "DEMO";
+        next.updatedAt = new Date().toISOString();
+
+        await mercuryRedisSet(MERCURY_CONTROL_KEY, next);
+
+        return res.status(200).json({
+          ok: true,
+          organ: "MERCURY",
+          message: next.enabled
+            ? "MERCURY_CONTROL_ENABLED"
+            : "MERCURY_CONTROL_DISABLED",
+          control: next,
+          serverTime: new Date().toISOString()
+        });
+      } catch (error) {
+        console.error("MERCURY CONTROL ERROR", error);
+        return res.status(500).json({
+          ok: false,
+          error: "MERCURY_CONTROL_FAILED",
+          detail: String(error?.message || error).slice(0, 300)
+        });
+      }
+    }
+
+    // ============================================================
+    // MERCURY — LEGACY COMMAND POLL
+    // Compatibilità con bridge precedenti. NON invia trade.
     // ============================================================
     if (body.action === "mercury_mt5_poll") {
-      return res.status(200).json({
-        ok: true,
-        organ: "MERCURY",
-        bridge: "MT5",
-        mode: "DEMO",
-       command: null,
-        message: "MERCURY_MT5_POLL_OK",
-        serverTime: new Date().toISOString()
-      });
+      try {
+        const control = await mercuryGetOrCreateControl();
+
+        return res.status(200).json({
+          ok: true,
+          organ: "MERCURY",
+          bridge: "MT5",
+          mode: "DEMO",
+          command: null,
+          control,
+          message: "MERCURY_MT5_POLL_OK",
+          serverTime: new Date().toISOString()
+        });
+      } catch (error) {
+        return res.status(500).json({
+          ok: false,
+          error: "MERCURY_MT5_POLL_FAILED",
+          detail: String(error?.message || error).slice(0, 300)
+        });
+      }
     }
+
     // ============================================================
     // CORTEX — VOCE (ElevenLabs TTS)
     // ============================================================
