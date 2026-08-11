@@ -28,7 +28,82 @@ function chunkText(t) {
         }
       ];
 }
+// ============================================================
+// MERCURY — REDIS CONTROL PLANE v0.1
+// Persistent state + control for MT5 / CORTEX
+// ============================================================
 
+const MERCURY_REDIS_URL =
+  process.env.MERCURY_REDIS_KV_REST_API_URL;
+
+const MERCURY_REDIS_TOKEN =
+  process.env.MERCURY_REDIS_KV_REST_API_TOKEN;
+
+async function mercuryRedis(command) {
+  if (!MERCURY_REDIS_URL || !MERCURY_REDIS_TOKEN) {
+    throw new Error("MERCURY_REDIS_NOT_CONFIGURED");
+  }
+
+  const response = await fetch(MERCURY_REDIS_URL, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${MERCURY_REDIS_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(command),
+  });
+
+  const text = await response.text();
+
+  let data = null;
+
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new Error(
+      `MERCURY_REDIS_INVALID_RESPONSE: ${text.slice(0, 150)}`
+    );
+  }
+
+  if (!response.ok) {
+    throw new Error(
+      `MERCURY_REDIS_HTTP_${response.status}`
+    );
+  }
+
+  if (data?.error) {
+    throw new Error(
+      `MERCURY_REDIS_ERROR: ${data.error}`
+    );
+  }
+
+  return data?.result ?? null;
+}
+
+async function mercuryRedisSet(key, value) {
+  return mercuryRedis([
+    "SET",
+    key,
+    JSON.stringify(value),
+  ]);
+}
+
+async function mercuryRedisGet(key) {
+  const raw = await mercuryRedis([
+    "GET",
+    key,
+  ]);
+
+  if (raw === null || raw === undefined) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return raw;
+  }
+}
 // ============================================================
 // SHOPIFY — autenticazione client_credentials (negozi Primavera '26)
 // ============================================================
