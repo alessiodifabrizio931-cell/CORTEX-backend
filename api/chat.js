@@ -5779,7 +5779,270 @@ export default async function handler(
     }
 
     // ============================================================
-    // PULSUS / LUMEN — GENERAZIONE VIDEO
+    // PULSUS / LUMEN — CREATIVE VIDEO STUDIO v2
+    // Scene planning + multi-clip Pexels + optional Gemini Omni hero clips
+    // ============================================================
+
+    if (body.action === "creative_video") {
+      const ck = process.env.CREATOMATE_API_KEY;
+      const pk = process.env.PEXELS_API_KEY;
+      const gk = process.env.GEMINI_API_KEY;
+
+      if (!ck) return res.status(500).json({ error: "CREATOMATE_API_KEY mancante" });
+      if (!pk) return res.status(500).json({ error: "PEXELS_API_KEY mancante" });
+      if (!gk) return res.status(500).json({ error: "GEMINI_API_KEY mancante" });
+
+      const agent = (body.agent || "pulsus").toString().toLowerCase();
+      if (!["pulsus", "lumen"].includes(agent)) {
+        return res.status(400).json({ error: "agent deve essere pulsus o lumen" });
+      }
+
+      const topic = (body.topic || "").toString().trim();
+      if (!topic) return res.status(400).json({ error: "topic mancante" });
+
+      const sourceModeRaw = (body.source_mode || "stock").toString().toLowerCase();
+      const sourceMode = ["stock", "hybrid", "ai"].includes(sourceModeRaw) ? sourceModeRaw : "stock";
+      const style = (body.style || (agent === "pulsus" ? "cinematic" : "editorial")).toString().trim();
+      const goal = (body.goal || (agent === "pulsus" ? "retention" : "storytelling")).toString().trim();
+      const requested = Number(body.duration_seconds || (agent === "pulsus" ? 30 : 90));
+      const maxDuration = agent === "pulsus" ? 60 : 180;
+      const durationSeconds = Math.min(Math.max(requested || 30, agent === "pulsus" ? 15 : 45), maxDuration);
+      const aspect = agent === "pulsus" ? "9:16" : ((body.aspect_ratio || "16:9") === "9:16" ? "9:16" : "16:9");
+      const width = aspect === "9:16" ? 1080 : 1920;
+      const height = aspect === "9:16" ? 1920 : 1080;
+      const targetSceneCount = Math.min(agent === "pulsus" ? 10 : 24, Math.max(4, Math.round(durationSeconds / (agent === "pulsus" ? 4.5 : 7.5))));
+      const wordTarget = Math.max(28, Math.round(durationSeconds * 2.15));
+      const creativeModel = process.env.GEMINI_CREATIVE_MODEL || "gemini-3.5-flash";
+      const warnings = [];
+
+      const extractGeminiText = (data) => ((data?.candidates?.[0]?.content?.parts || []).map((p) => p?.text || "").join("").trim());
+      const stripJson = (text) => (text || "").replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
+
+      const requestPlan = async (model) => {
+        const sys = agent === "pulsus"
+          ? "Sei PULSUS, regista e montatore short-form. Crei Reel/TikTok premium, dinamici, credibili e non generici. Ogni scena deve avere un motivo narrativo e visivo."
+          : "Sei LUMEN, regista/editor long-form. Costruisci video editoriali con ritmo, chiarezza, retention e B-roll coerente. Evita immagini stock casuali e ripetitive.";
+        const prompt = `Progetta un video ${agent === "pulsus" ? "short-form verticale" : "editoriale"} di circa ${durationSeconds} secondi sul tema: ${JSON.stringify(topic)}. Obiettivo: ${goal}. Stile: ${style}. Formato: ${aspect}. Crea circa ${targetSceneCount} scene e un voiceover di circa ${wordTarget} parole. Le query Pexels devono essere IN INGLESE, concrete e visivamente cercabili. Gli ai_prompt devono descrivere in inglese una singola clip cinematografica fotorealistica con soggetto, azione, camera, luce e mood. Evita loghi, testo generato dentro le immagini e scene generiche. Rispondi SOLO JSON valido con questa forma: {"title":"...","hook":"...","voiceover":"...","scenes":[{"search_query":"...","ai_prompt":"...","overlay":"..."}]}.`;
+        const gr = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${gk}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            systemInstruction: { parts: [{ text: sys }] },
+            contents: [{ role: "user", parts: [{ text: prompt }] }],
+            generationConfig: { temperature: 0.78, maxOutputTokens: 5000, responseMimeType: "application/json" }
+          })
+        });
+        const gd = await gr.json();
+        if (!gr.ok) throw new Error(gd?.error?.message || `Gemini ${model} error ${gr.status}`);
+        const txt = extractGeminiText(gd);
+        if (!txt) throw new Error("Piano creativo vuoto");
+        return JSON.parse(stripJson(txt));
+      };
+
+      let plan;
+      try {
+        plan = await requestPlan(creativeModel);
+      } catch (e) {
+        warnings.push(`Creative model fallback: ${e?.message || e}`);
+        plan = await requestPlan(MODEL);
+      }
+
+      let scenes = Array.isArray(plan?.scenes) ? plan.scenes.filter(Boolean) : [];
+      if (!scenes.length) scenes = [{ search_query: topic, ai_prompt: topic, overlay: "" }];
+      if (scenes.length > targetSceneCount) scenes = scenes.slice(0, targetSceneCount);
+      while (scenes.length < Math.min(4, targetSceneCount)) scenes.push({ ...scenes[scenes.length - 1] });
+
+      const voiceover = (plan?.voiceover || "").toString().trim();
+      if (!voiceover) return res.status(502).json({ error: "Voiceover non generato" });
+
+      const sceneDur = durationSeconds / scenes.length;
+      const credits = [];
+
+      const findPexelsClip = async (query, idx) => {
+        const orientation = aspect === "9:16" ? "portrait" : "landscape";
+        const pr = await fetch(`https://api.pexels.com/v1/videos/search?query=${encodeURIComponent(query || topic)}&orientation=${orientation}&per_page=10`, {
+          headers: { Authorization: pk }
+        });
+        const pd = await pr.json();
+        if (!pr.ok) throw new Error(pd?.error || `Pexels video ${pr.status}`);
+        const videos = pd?.videos || [];
+        if (!videos.length) throw new Error(`Nessuna clip Pexels per "${query}"`);
+
+        const pick = videos[idx % Math.min(videos.length, 5)] || videos[0];
+        const targetRatio = width / height;
+        const files = (pick.video_files || []).filter((f) => f?.file_type === "video/mp4" && f?.link);
+        files.sort((a, b) => {
+          const ar = Math.abs(((a.width || 1) / (a.height || 1)) - targetRatio);
+          const br = Math.abs(((b.width || 1) / (b.height || 1)) - targetRatio);
+          if (Math.abs(ar - br) > 0.04) return ar - br;
+          return ((b.width || 0) * (b.height || 0)) - ((a.width || 0) * (a.height || 0));
+        });
+        const file = files[0];
+        if (!file) throw new Error("Pexels non ha restituito un MP4 utilizzabile");
+        credits.push({ provider: "Pexels", url: pick.url || "https://www.pexels.com", author: pick.user?.name || "" });
+        return { url: file.link, duration: Number(pick.duration || 0), provider: "pexels" };
+      };
+
+      const findVideoUri = (obj) => {
+        if (!obj || typeof obj !== "object") return null;
+        if (typeof obj.uri === "string" && obj.uri.includes("files/")) return obj.uri;
+        if (Array.isArray(obj)) {
+          for (const v of obj) { const found = findVideoUri(v); if (found) return found; }
+          return null;
+        }
+        for (const v of Object.values(obj)) { const found = findVideoUri(v); if (found) return found; }
+        return null;
+      };
+
+      const generateOmniClip = async (prompt) => {
+        const or = await fetch(`https://generativelanguage.googleapis.com/v1beta/interactions?key=${gk}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: process.env.GEMINI_VIDEO_MODEL || "gemini-omni-flash-preview",
+            input: prompt,
+            response_format: { type: "video", aspect_ratio: aspect, delivery: "uri" },
+            generation_config: { video_config: { task: "text_to_video" } }
+          })
+        });
+        const od = await or.json();
+        if (!or.ok) throw new Error(od?.error?.message || `Gemini video ${or.status}`);
+        const uri = od?.output_video?.uri || findVideoUri(od);
+        if (!uri) throw new Error("Gemini video non ha restituito un URI");
+        const match = uri.match(/files\/[A-Za-z0-9._-]+/);
+        if (!match) throw new Error("URI Gemini video non valido");
+        const fileName = match[0];
+
+        for (let i = 0; i < 10; i++) {
+          const fr = await fetch(`https://generativelanguage.googleapis.com/v1beta/${fileName}?key=${gk}`);
+          const fd = await fr.json();
+          const state = (fd?.state?.name || fd?.state || "").toString().toUpperCase();
+          if (state === "ACTIVE" || !state) break;
+          if (state === "FAILED") throw new Error("Generazione Gemini video fallita");
+          await new Promise((resolve) => setTimeout(resolve, 2200));
+        }
+
+        // Used only server-to-server by Creatomate. The key is never returned to the browser.
+        const url = `https://generativelanguage.googleapis.com/v1beta/${fileName}:download?alt=media&key=${encodeURIComponent(gk)}`;
+        credits.push({ provider: "Gemini Omni", url: "", author: "Google" });
+        return { url, duration: 8, provider: "gemini" };
+      };
+
+      const aiBudget = sourceMode === "stock" ? 0 : (sourceMode === "hybrid" ? 1 : Math.min(3, scenes.length));
+      const media = [];
+      let aiUsed = 0;
+
+      for (let i = 0; i < scenes.length; i++) {
+        const sc = scenes[i] || {};
+        let asset = null;
+        if (aiUsed < aiBudget) {
+          const shouldUseAi = sourceMode === "ai" ? (i % Math.max(1, Math.floor(scenes.length / aiBudget)) === 0) : i === 0;
+          if (shouldUseAi) {
+            try {
+              asset = await generateOmniClip((sc.ai_prompt || sc.search_query || topic).toString());
+              aiUsed++;
+            } catch (e) {
+              warnings.push(`AI clip ${i + 1} non disponibile: ${e?.message || e}. Usata clip reale.`);
+            }
+          }
+        }
+        if (!asset) asset = await findPexelsClip((sc.search_query || topic).toString(), i);
+        media.push(asset);
+      }
+
+      const elements = [];
+      let cursor = 0;
+      for (let i = 0; i < media.length; i++) {
+        const asset = media[i];
+        const sc = scenes[i] || {};
+        const vd = sceneDur;
+        const videoEl = {
+          type: "video",
+          track: 1,
+          time: Number(cursor.toFixed(3)),
+          duration: Number(vd.toFixed(3)),
+          source: asset.url,
+          fit: "cover",
+          volume: "0%"
+        };
+        if (asset.provider === "pexels") {
+          if (asset.duration && asset.duration < vd) videoEl.loop = true;
+          else videoEl.trim_duration = Number(vd.toFixed(3));
+        }
+        if (i > 0) videoEl.animations = [{ duration: Math.min(0.35, vd / 3), transition: true, type: "fade" }];
+        elements.push(videoEl);
+
+        const overlay = (sc.overlay || "").toString().trim();
+        if (overlay) {
+          elements.push({
+            type: "text",
+            track: 4,
+            time: Number(cursor.toFixed(3)),
+            duration: Number(Math.min(vd, 2.4).toFixed(3)),
+            text: overlay.slice(0, 72),
+            x: "50%", y: aspect === "9:16" ? "18%" : "16%",
+            width: aspect === "9:16" ? "86%" : "70%", height: "18%",
+            x_alignment: "50%", y_alignment: "50%",
+            font_family: "Montserrat", font_weight: "700",
+            font_size: aspect === "9:16" ? "6.2 vmin" : "4.2 vmin",
+            fill_color: "#ffffff", stroke_color: "rgba(0,0,0,0.65)", stroke_width: "0.8 vmin"
+          });
+        }
+        cursor += vd;
+      }
+
+      const voiceId = (body.voiceId || "XrExE9yKIg1WjnnlVkGX").toString();
+      elements.push({
+        type: "audio", name: "Voiceover-1", track: 2, time: 0,
+        source: voiceover,
+        provider: `elevenlabs model_id=eleven_multilingual_v2 voice_id=${voiceId}`
+      });
+      elements.push({
+        type: "text", track: 5, transcript_source: "Voiceover-1", transcript_effect: "highlight",
+        transcript_maximum_length: agent === "pulsus" ? 3 : 5,
+        y: aspect === "9:16" ? "80%" : "84%", width: aspect === "9:16" ? "90%" : "78%", height: "22%",
+        x_alignment: "50%", y_alignment: "50%",
+        font_family: "Montserrat", font_weight: "700",
+        font_size: aspect === "9:16" ? "7.3 vmin" : "4.4 vmin",
+        fill_color: "#ffffff", stroke_color: "#000000", stroke_width: aspect === "9:16" ? "1.25 vmin" : "0.75 vmin",
+        background_color: "rgba(0,0,0,0)", text_transform: agent === "pulsus" ? "uppercase" : "none"
+      });
+
+      const source = { output_format: "mp4", width, height, duration: durationSeconds, elements };
+      const cr = await fetch("https://api.creatomate.com/v2/renders", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${ck}` },
+        // Creatomate v2 accepts RenderScript directly at the request root.
+        body: JSON.stringify({ ...source, metadata: `CORTEX_${agent.toUpperCase()}_${sourceMode}` })
+      });
+      const cd = await cr.json();
+      if (!cr.ok) return res.status(cr.status).json({ error: "Errore Creatomate", details: cd });
+      const render = Array.isArray(cd) ? cd[0] : cd;
+
+      return res.status(200).json({
+        ok: true,
+        id: render?.id,
+        status: render?.status,
+        url: render?.url || null,
+        source_mode: sourceMode,
+        ai_clips_used: aiUsed,
+        plan: {
+          title: (plan?.title || topic).toString(),
+          hook: (plan?.hook || "").toString(),
+          voiceover,
+          scenes: scenes.map((sc, i) => ({
+            search_query: (sc?.search_query || topic).toString(),
+            overlay: (sc?.overlay || "").toString(),
+            provider: media[i]?.provider || "pexels"
+          }))
+        },
+        credits,
+        warnings
+      });
+    }
+
+    // ============================================================
+    // PULSUS / LUMEN — GENERAZIONE VIDEO (legacy compatibility)
     // ============================================================
 
     if (
@@ -6127,7 +6390,7 @@ export default async function handler(
 
       const sr =
         await fetch(
-          "https://api.creatomate.com/v1/renders/" +
+          "https://api.creatomate.com/v2/renders/" +
             encodeURIComponent(
               id
             ),
@@ -11361,10 +11624,21 @@ export default async function handler(
     // GEMINI → OPENROUTER → GROQ
     // ============================================================
 
-    const {
-      system,
-      messages
-    } = body;
+    let system = body.system;
+    const { messages } = body;
+    const agentId = (body.agent || "").toString().trim().toLowerCase();
+    const isCreativeAgent = ["pulsus", "lumen", "iride"].includes(agentId);
+
+    if (isCreativeAgent) {
+      system = `${system || ""}
+
+CORTEX CREATIVE RELIABILITY CONTRACT:
+- Rispondi sempre alla richiesta creativa concreta dell'utente.
+- Non restituire classificazioni, metadati o frasi come \"User Safety: safe\".
+- Non limitarti a confermare il task: produci direttamente il risultato richiesto.
+- Scrivi in italiano salvo richiesta diversa.
+- Output naturale, specifico e pronto per produzione; niente formule generiche da AI.`.trim();
+    }
 
     if (
       !Array.isArray(
@@ -11648,6 +11922,17 @@ export default async function handler(
         );
       };
 
+    const isBadCreativeReply = (text) => {
+      if (!isCreativeAgent) return false;
+      const clean = (text || "").toString().trim();
+      const low = clean.toLowerCase();
+      if (!clean || clean.length < 24) return true;
+      if (/^user\s+safety\s*:\s*safe[.!]?$/i.test(clean)) return true;
+      if (/^(safe|unsafe|allowed|blocked)[.!]?$/i.test(clean)) return true;
+      if (low.includes("user safety:") && clean.length < 120) return true;
+      return false;
+    };
+
     // ============================================================
     // PROVIDER 1 — GEMINI
     // ============================================================
@@ -11676,6 +11961,10 @@ export default async function handler(
             messages
           );
 
+        const chatModel = isCreativeAgent
+          ? (process.env.GEMINI_CREATIVE_MODEL || "gemini-3.5-flash")
+          : MODEL;
+
         const gbody = {
           contents,
 
@@ -11684,7 +11973,7 @@ export default async function handler(
               8192,
 
             temperature:
-              0.7
+              isCreativeAgent ? 0.82 : 0.7
           }
         };
 
@@ -11701,7 +11990,7 @@ export default async function handler(
         }
 
         const url =
-          `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${key}`;
+          `https://generativelanguage.googleapis.com/v1beta/models/${chatModel}:generateContent?key=${key}`;
 
         try {
           const r =
@@ -11762,7 +12051,7 @@ export default async function handler(
               )
               .trim();
 
-          if (!text) {
+          if (!text || isBadCreativeReply(text)) {
             return {
               ok:
                 false,
@@ -11771,7 +12060,7 @@ export default async function handler(
                 502,
 
               error:
-                "Gemini non ha restituito testo"
+                !text ? "Gemini non ha restituito testo" : "Gemini ha restituito una risposta creativa non valida"
             };
           }
 
@@ -11783,7 +12072,7 @@ export default async function handler(
               "gemini",
 
             model:
-              MODEL,
+              chatModel,
 
             text
           };
@@ -11939,7 +12228,7 @@ export default async function handler(
               .toString()
               .trim();
 
-          if (!text) {
+          if (!text || isBadCreativeReply(text)) {
             return {
               ok:
                 false,
@@ -11948,7 +12237,7 @@ export default async function handler(
                 502,
 
               error:
-                "OpenRouter non ha restituito testo"
+                !text ? "OpenRouter non ha restituito testo" : "OpenRouter ha restituito una risposta creativa non valida"
             };
           }
 
@@ -12103,7 +12392,7 @@ export default async function handler(
               .toString()
               .trim();
 
-          if (!text) {
+          if (!text || isBadCreativeReply(text)) {
             return {
               ok:
                 false,
@@ -12112,7 +12401,7 @@ export default async function handler(
                 502,
 
               error:
-                "Groq non ha restituito testo"
+                !text ? "Groq non ha restituito testo" : "Groq ha restituito una risposta creativa non valida"
             };
           }
 
