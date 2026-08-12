@@ -5126,7 +5126,7 @@ export default async function handler(
     const body =
       req.body || {};
     // ============================================================
-    // MERCURY — CONTROL PLANE v1.2
+    // MERCURY — CONTROL PLANE v1.4
     // MT5 <-> Redis <-> CORTEX
     // DEMO ONLY
     // ============================================================
@@ -5145,19 +5145,20 @@ export default async function handler(
     const mercuryAllowedStrategies = [
       "SCALP_M1_RR1_FAST",
       "SCALP_M1_RR1_RAPID",
-      "SCALP_M1_RR1_RAPID_EXEC"
+      "SCALP_M1_RR1_RAPID_EXEC",
+      "SCALP_ENGINE_V2_M15_M5_M1_RR15"
     ];
 
     const mercuryDefaultControl = () => ({
       enabled: false,
       mode: "DEMO",
-      strategy: "SCALP_M1_RR1_RAPID_EXEC",
+      strategy: "SCALP_ENGINE_V2_M15_M5_M1_RR15",
       markets: [...mercuryAllowedMarkets],
       riskPerTradePct: 1,
       maxPositions: 2,
       dailyLossLimitPct: 4,
       maxDrawdownPct: 10,
-      riskReward: 1,
+      riskReward: 1.5,
       riskResetSeq: 0,
       riskResetType: null,
       riskResetRequestedAt: null,
@@ -5266,7 +5267,10 @@ export default async function handler(
               reason: mercuryString(item?.reason, 100),
               direction: mercuryString(item?.direction, 10),
               strategy: mercuryString(item?.strategy, 60),
-              score: mercuryNumber(item?.score, null)
+              score: mercuryNumber(item?.score, null),
+              regime: mercuryString(item?.regime, 30),
+              setup: mercuryString(item?.setup, 50),
+              nextCondition: mercuryString(item?.nextCondition, 120)
             }))
           : [];
 
@@ -5280,6 +5284,32 @@ export default async function handler(
               sl: mercuryNumber(p?.sl, null),
               tp: mercuryNumber(p?.tp, null),
               profit: mercuryNumber(p?.profit, 0),
+              magic: mercuryNumber(p?.magic, null),
+              openedAt: mercuryString(p?.openedAt, 50),
+              setup: mercuryString(p?.setup, 50)
+            }))
+          : [];
+
+        const closedPositions = Array.isArray(body.closedPositions)
+          ? body.closedPositions.slice(0, 40).map((p) => ({
+              positionId: mercuryString(p?.positionId, 40),
+              symbol: mercuryString(p?.symbol, 30),
+              market: mercuryString(p?.market, 20),
+              direction: mercuryString(p?.direction, 10),
+              volume: mercuryNumber(p?.volume, null),
+              entry: mercuryNumber(p?.entry, null),
+              exit: mercuryNumber(p?.exit, null),
+              sl: mercuryNumber(p?.sl, null),
+              tp: mercuryNumber(p?.tp, null),
+              profit: mercuryNumber(p?.profit, 0),
+              commission: mercuryNumber(p?.commission, 0),
+              swap: mercuryNumber(p?.swap, 0),
+              netProfit: mercuryNumber(p?.netProfit, mercuryNumber(p?.profit, 0)),
+              outcome: mercuryString(p?.outcome, 20),
+              closeReason: mercuryString(p?.closeReason, 30),
+              openedAt: mercuryString(p?.openedAt, 50),
+              closedAt: mercuryString(p?.closedAt, 50),
+              durationSec: mercuryNumber(p?.durationSec, null),
               magic: mercuryNumber(p?.magic, null)
             }))
           : [];
@@ -5306,6 +5336,7 @@ export default async function handler(
           terminalTradeAllowed: mercuryBool(body.terminalTradeAllowed, false),
           scanner,
           openPositions,
+          closedPositions,
           lastEvent:
             body.lastEvent && typeof body.lastEvent === "object"
               ? {
@@ -5464,7 +5495,7 @@ export default async function handler(
     // MERCURY — CONTROL
     // START/STOP + parametri autorizzati.
     // HARD CAPS SERVER-SIDE:
-    // risk <= 1%, positions <= 2, daily loss <= 4%, DD <= 10%, RR 1:1
+    // risk <= 1%, positions <= 2, daily loss <= 4%, DD <= 10%, RR 1:1.5
     // ============================================================
     if (body.action === "mercury_control") {
       try {
@@ -5564,7 +5595,7 @@ export default async function handler(
           next.maxDrawdownPct = dd;
         }
 
-        next.riskReward = 1;
+        next.riskReward = 1.5;
         next.mode = "DEMO";
         next.updatedAt = new Date().toISOString();
 
