@@ -5780,9 +5780,9 @@ export default async function handler(
 
 
     // ============================================================
-    // PULSUS / LUMEN — LOCAL VIDEO WORKER BRIDGE v1.6
-    // Regia con fallback AI + ricerca autonoma clip Pexels.
-    // Non usa Creatomate e non richiede Gemini per la modalità stock.
+    // PULSUS / LUMEN — LOCAL VIDEO DIRECTOR v1.7
+    // Free-first: OpenRouter/Groq -> Gemini -> local fallback.
+    // Director più selettivo + Pexels scoring + query alternative.
     // ============================================================
 
     if (body.action === "video_director_local") {
@@ -5796,30 +5796,79 @@ export default async function handler(
 
       const style = (body.style || (agent === "pulsus" ? "cinematic" : "editorial")).toString().trim();
       const goal = (body.goal || (agent === "pulsus" ? "retention" : "storytelling")).toString().trim();
-      const requested = Number(body.duration_seconds || (agent === "pulsus" ? 30 : 75));
+      const requested = Number(body.duration_seconds || (agent === "pulsus" ? 30 : 90));
       const durationSeconds = agent === "pulsus"
         ? Math.min(Math.max(requested || 30, 15), 60)
-        : Math.min(Math.max(requested || 75, 45), 240);
-      const aspect = agent === "pulsus" ? "9:16" : ((body.aspect_ratio || "16:9") === "9:16" ? "9:16" : "16:9");
+        : Math.min(Math.max(requested || 90, 45), 240);
+      const aspect = agent === "pulsus"
+        ? "9:16"
+        : ((body.aspect_ratio || "16:9") === "9:16" ? "9:16" : "16:9");
+
       const targetScenes = agent === "pulsus"
-        ? Math.min(12, Math.max(5, Math.round(durationSeconds / 3.2)))
-        : Math.min(28, Math.max(7, Math.round(durationSeconds / 6.5)));
-      const wordTarget = Math.max(28, Math.round(durationSeconds * (agent === "pulsus" ? 2.05 : 1.75)));
+        ? Math.min(16, Math.max(6, Math.round(durationSeconds / 2.55)))
+        : Math.min(32, Math.max(8, Math.round(durationSeconds / 5.7)));
+
+      const wordTarget = Math.max(
+        agent === "pulsus" ? 32 : 65,
+        Math.round(durationSeconds * (agent === "pulsus" ? 2.0 : 1.85))
+      );
 
       const systemPrompt = agent === "pulsus"
-        ? `Sei PULSUS, regista short-form premium. Progetti Reel/TikTok/Shorts con hook immediato, micro-scene, ritmo alto, pattern interrupt e payoff. Evita motivazionale generico, immagini stock casuali, ripetizioni e cliché.`
-        : `Sei LUMEN, regista/editor long-form premium. Progetti video narrativi con sequenze, continuità visiva, A-roll/B-roll concettuale, aperture forti, capitoli e payoff. Evita B-roll casuale e scene ridondanti.`;
+        ? `Sei PULSUS, regista short-form premium di CORTEX.
+Mentalità: Reel/TikTok/Shorts professionali, mai slideshow stock.
+Apri con un'immagine o una frase che interrompe lo scroll entro 1,5 secondi.
+Alterna dettagli, azione, reazioni, establishing e payoff. Ogni clip deve avere una funzione.
+Il montaggio deve essere rapido ma leggibile: hard cut puliti, pattern interrupt, zero dissolvenze gratuite.
+Il voiceover è italiano parlato: frasi brevi, pause naturali, niente tono motivazionale generico, niente linguaggio da AI.`
+        : `Sei LUMEN, regista/editor long-form premium di CORTEX.
+Mentalità: mini-documentario/editorial video, non sequenza casuale di stock.
+Costruisci apertura, sviluppo, respiro, capitoli impliciti e payoff.
+Alterna establishing, processo, dettagli, persone, contesto e reazioni.
+Il voiceover è italiano naturale, più calmo e narrativo di PULSUS, con frasi respirabili e transizioni reali.
+Evita ripetizioni, B-roll casuale, cliché e frasi da intelligenza artificiale.`;
 
-      const userPrompt = `Progetta un video di ${durationSeconds}s sul tema ${JSON.stringify(topic)}. Stile: ${style}. Obiettivo: ${goal}. Formato: ${aspect}. Crea circa ${targetScenes} scene.
-Le query per footage stock DEVONO essere in inglese, concrete, visive e diverse tra loro. Ogni scena deve aggiungere informazione o emozione.
-Il voiceover deve essere in italiano, naturale, circa ${wordTarget} parole.
+      const userPrompt = `Progetta un video di ${durationSeconds}s.
+TEMA: ${JSON.stringify(topic)}
+STILE: ${style}
+OBIETTIVO: ${goal}
+FORMATO: ${aspect}
+SCENE TARGET: circa ${targetScenes}
+VOICEOVER TARGET: circa ${wordTarget} parole.
+
+REGOLE FOOTAGE:
+- search_query e alt_query DEVONO essere in inglese.
+- Devono descrivere ciò che deve essere VISIBILE, non concetti astratti.
+- Ogni scena deve cercare un'inquadratura diversa.
+- Non ripetere la stessa query.
+- must_show deve indicare 1-3 elementi visuali concreti.
+- shot_type: close-up | detail | medium | wide | action | portrait | process | environment.
+- energy: low | medium | high.
+- overlay: massimo 7 parole, solo quando aggiunge valore.
+
+VOICEOVER:
+- italiano parlato naturale.
+- punteggiatura utile alle pause.
+- niente elenchi recitati.
+- niente "in un mondo dove", "scopri", "lasciati trasportare", "non è solo".
+- PULSUS: attacco immediato e payoff netto.
+- LUMEN: apertura forte, respiro e sviluppo.
+
 Rispondi SOLO JSON valido:
 {
   "title":"...",
   "hook":"...",
   "voiceover":"...",
   "scenes":[
-    {"search_query":"english concrete video search","overlay":"testo breve opzionale","duration":3.0,"purpose":"perché serve"}
+    {
+      "search_query":"english visual query",
+      "alt_query":"second english visual query",
+      "overlay":"",
+      "duration":3.0,
+      "purpose":"funzione narrativa",
+      "shot_type":"detail",
+      "energy":"medium",
+      "must_show":["concrete element"]
+    }
   ]
 }`;
 
@@ -5828,65 +5877,68 @@ Rispondi SOLO JSON valido:
         .replace(/\s*```$/i, "")
         .trim();
 
+      const normEnum = (v, allowed, fallback) => {
+        const x = (v || "").toString().trim().toLowerCase();
+        return allowed.includes(x) ? x : fallback;
+      };
+
       const validatePlan = (p) => {
         if (!p || typeof p !== "object") return null;
         let scenes = Array.isArray(p.scenes) ? p.scenes.filter(Boolean) : [];
-        scenes = scenes.map((s) => ({
-          search_query: (s?.search_query || topic).toString().trim(),
-          overlay: (s?.overlay || "").toString().trim().slice(0, 80),
+        scenes = scenes.map((s, idx) => ({
+          search_query: (s?.search_query || topic).toString().trim().slice(0, 180),
+          alt_query: (s?.alt_query || "").toString().trim().slice(0, 180),
+          overlay: (s?.overlay || "").toString().trim().slice(0, 65),
           duration: Number(s?.duration || 0),
-          purpose: (s?.purpose || "").toString().trim().slice(0, 180)
+          purpose: (s?.purpose || "").toString().trim().slice(0, 180),
+          shot_type: normEnum(s?.shot_type,
+            ["close-up","detail","medium","wide","action","portrait","process","environment"],
+            idx === 0 ? "wide" : "detail"),
+          energy: normEnum(s?.energy, ["low","medium","high"], agent === "pulsus" ? "high" : "medium"),
+          must_show: Array.isArray(s?.must_show)
+            ? s.must_show.map(x => String(x).trim()).filter(Boolean).slice(0,3)
+            : []
         })).filter((s) => s.search_query);
+
         if (!scenes.length) return null;
-        if (scenes.length > targetScenes + 3) scenes = scenes.slice(0, targetScenes + 3);
+        if (scenes.length > targetScenes + 4) scenes = scenes.slice(0, targetScenes + 4);
+
+        // Rimuove query duplicate esatte.
+        const seen = new Set();
+        scenes = scenes.filter((s) => {
+          const k = s.search_query.toLowerCase().replace(/\s+/g, " ");
+          if (seen.has(k)) return false;
+          seen.add(k);
+          return true;
+        });
+        if (!scenes.length) return null;
 
         const fallbackDur = durationSeconds / scenes.length;
         let sum = 0;
         scenes = scenes.map((s) => {
           let d = Number.isFinite(s.duration) && s.duration > 0 ? s.duration : fallbackDur;
-          d = Math.min(Math.max(d, agent === "pulsus" ? 1.4 : 2.5), agent === "pulsus" ? 5.5 : 12);
+          d = agent === "pulsus"
+            ? Math.min(Math.max(d, 1.2), 4.7)
+            : Math.min(Math.max(d, 2.6), 11.5);
           sum += d;
           return { ...s, duration: d };
         });
-        if (sum <= 0) sum = durationSeconds;
-        const scale = durationSeconds / sum;
-        scenes = scenes.map((s) => ({ ...s, duration: Number((s.duration * scale).toFixed(3)) }));
+        const scale = durationSeconds / Math.max(sum, 0.001);
+        scenes = scenes.map((s) => ({
+          ...s,
+          duration: Number((s.duration * scale).toFixed(3))
+        }));
 
         return {
           title: (p.title || topic).toString().trim().slice(0, 120),
           hook: (p.hook || "").toString().trim().slice(0, 240),
           voiceover: (p.voiceover || "").toString().trim(),
+          edit_profile: agent === "pulsus" ? "SHORT_HARD_CUTS" : "EDITORIAL_SOFT_CONTINUITY",
           scenes
         };
       };
 
       const diagnostics = [];
-
-      const callGeminiPlan = async () => {
-        const key = process.env.GEMINI_API_KEY;
-        if (!key) return null;
-        try {
-          const model = process.env.GEMINI_CREATIVE_MODEL || process.env.GEMINI_MODEL || "gemini-3.5-flash";
-          const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              systemInstruction: { parts: [{ text: systemPrompt }] },
-              contents: [{ role: "user", parts: [{ text: userPrompt }] }],
-              generationConfig: { temperature: 0.72, maxOutputTokens: 5000, responseMimeType: "application/json" }
-            })
-          });
-          const d = await r.json();
-          if (!r.ok) throw new Error(d?.error?.message || `Gemini ${r.status}`);
-          const txt = ((d?.candidates?.[0]?.content?.parts || []).map((x) => x?.text || "").join("")).trim();
-          const p = validatePlan(JSON.parse(stripFence(txt)));
-          if (!p) throw new Error("piano non valido");
-          return { plan: p, provider: "gemini", model };
-        } catch (e) {
-          diagnostics.push({ provider: "gemini", error: String(e?.message || e).slice(0, 240) });
-          return null;
-        }
-      };
 
       const callOpenRouterPlan = async () => {
         const key = process.env.OPENROUTER_API_KEY;
@@ -5903,7 +5955,7 @@ Rispondi SOLO JSON valido:
             },
             body: JSON.stringify({
               model,
-              temperature: 0.72,
+              temperature: agent === "pulsus" ? 0.78 : 0.68,
               messages: [
                 { role: "system", content: systemPrompt + " Restituisci esclusivamente JSON valido." },
                 { role: "user", content: userPrompt }
@@ -5932,7 +5984,7 @@ Rispondi SOLO JSON valido:
             headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
             body: JSON.stringify({
               model,
-              temperature: 0.65,
+              temperature: agent === "pulsus" ? 0.72 : 0.62,
               response_format: { type: "json_object" },
               messages: [
                 { role: "system", content: systemPrompt + " Restituisci esclusivamente JSON valido." },
@@ -5942,8 +5994,7 @@ Rispondi SOLO JSON valido:
           });
           const d = await r.json();
           if (!r.ok) throw new Error(d?.error?.message || `Groq ${r.status}`);
-          const txt = d?.choices?.[0]?.message?.content || "";
-          const p = validatePlan(JSON.parse(stripFence(txt)));
+          const p = validatePlan(JSON.parse(stripFence(d?.choices?.[0]?.message?.content || "")));
           if (!p) throw new Error("piano non valido");
           return { plan: p, provider: "groq", model };
         } catch (e) {
@@ -5952,42 +6003,71 @@ Rispondi SOLO JSON valido:
         }
       };
 
-      let result = await callGeminiPlan();
-      if (!result) result = await callOpenRouterPlan();
+      const callGeminiPlan = async () => {
+        const key = process.env.GEMINI_API_KEY;
+        if (!key) return null;
+        try {
+          const model = process.env.GEMINI_CREATIVE_MODEL || process.env.GEMINI_MODEL || "gemini-3.5-flash";
+          const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              systemInstruction: { parts: [{ text: systemPrompt }] },
+              contents: [{ role: "user", parts: [{ text: userPrompt }] }],
+              generationConfig: { temperature: 0.68, maxOutputTokens: 5500, responseMimeType: "application/json" }
+            })
+          });
+          const d = await r.json();
+          if (!r.ok) throw new Error(d?.error?.message || `Gemini ${r.status}`);
+          const txt = ((d?.candidates?.[0]?.content?.parts || []).map((x) => x?.text || "").join("")).trim();
+          const p = validatePlan(JSON.parse(stripFence(txt)));
+          if (!p) throw new Error("piano non valido");
+          return { plan: p, provider: "gemini", model };
+        } catch (e) {
+          diagnostics.push({ provider: "gemini", error: String(e?.message || e).slice(0, 240) });
+          return null;
+        }
+      };
+
+      // Free-first: evita di dipendere dal credito Gemini.
+      let result = await callOpenRouterPlan();
       if (!result) result = await callGroqPlan();
+      if (!result) result = await callGeminiPlan();
 
       if (!result) {
-        // Fallback deterministico: il video stock continua a funzionare anche senza LLM.
         const base = topic.replace(/[^\p{L}\p{N}\s-]/gu, " ").replace(/\s+/g, " ").trim();
         const variants = agent === "pulsus"
           ? [
-              `${base} cinematic close up`,
-              `${base} dynamic action`,
-              `${base} emotional reaction`,
-              `${base} detail slow motion`,
-              `${base} wide establishing shot`,
-              `${base} hands movement`,
-              `${base} crowd atmosphere`,
-              `${base} dramatic lighting`
+              [`${base} cinematic establishing shot`, `${base} wide scene`,"wide","high"],
+              [`${base} close up hands detail`, `${base} macro detail`,"detail","medium"],
+              [`${base} dynamic action movement`, `${base} fast action`,"action","high"],
+              [`${base} human reaction close up`, `${base} emotional portrait`,"portrait","medium"],
+              [`${base} process detail cinematic`, `${base} working detail`,"process","medium"],
+              [`${base} atmospheric environment`, `${base} cinematic location`,"environment","low"],
+              [`${base} dramatic action close up`, `${base} intense detail`,"close-up","high"],
+              [`${base} final celebration reaction`, `${base} payoff reaction`,"action","high"]
             ]
           : [
-              `${base} documentary establishing shot`,
-              `${base} people working`,
-              `${base} close up detail`,
-              `${base} environment b roll`,
-              `${base} process documentary`,
-              `${base} human reaction`,
-              `${base} cinematic wide shot`,
-              `${base} thoughtful portrait`,
-              `${base} contextual b roll`
+              [`${base} documentary establishing shot`, `${base} location wide shot`,"wide","low"],
+              [`${base} people working documentary`, `${base} process at work`,"process","medium"],
+              [`${base} close up detail documentary`, `${base} craftsmanship detail`,"detail","low"],
+              [`${base} environment context b roll`, `${base} contextual location`,"environment","low"],
+              [`${base} thoughtful human portrait`, `${base} authentic person portrait`,"portrait","low"],
+              [`${base} process medium shot`, `${base} working medium shot`,"medium","medium"],
+              [`${base} cinematic wide context`, `${base} atmospheric wide shot`,"wide","low"],
+              [`${base} human reaction documentary`, `${base} candid reaction`,"portrait","medium"]
             ];
         const count = Math.min(targetScenes, variants.length);
         const d = durationSeconds / count;
-        const scenes = variants.slice(0, count).map((q, i) => ({
-          search_query: q,
-          overlay: i === 0 ? topic.slice(0, 70) : "",
+        const scenes = variants.slice(0, count).map((v, i) => ({
+          search_query: v[0],
+          alt_query: v[1],
+          overlay: i === 0 ? topic.slice(0, 60) : "",
           duration: Number(d.toFixed(3)),
-          purpose: i === 0 ? "hook" : "progressione visuale"
+          purpose: i === 0 ? "hook visuale" : "progressione visuale",
+          shot_type: v[2],
+          energy: v[3],
+          must_show: []
         }));
         result = {
           provider: "heuristic",
@@ -5996,6 +6076,7 @@ Rispondi SOLO JSON valido:
             title: topic,
             hook: topic,
             voiceover: "",
+            edit_profile: agent === "pulsus" ? "SHORT_HARD_CUTS" : "EDITORIAL_SOFT_CONTINUITY",
             scenes
           }
         };
@@ -6003,6 +6084,7 @@ Rispondi SOLO JSON valido:
 
       return res.status(200).json({
         ok: true,
+        version: "1.7",
         agent,
         duration_seconds: durationSeconds,
         aspect_ratio: aspect,
@@ -6017,58 +6099,101 @@ Rispondi SOLO JSON valido:
       const pk = process.env.PEXELS_API_KEY;
       if (!pk) return res.status(500).json({ error: "PEXELS_API_KEY mancante" });
 
-      const aspect = (body.aspect_ratio || "9:16").toString();
+      const agent = (body.agent || "pulsus").toString().toLowerCase();
+      const aspect = (body.aspect_ratio || (agent === "pulsus" ? "9:16" : "16:9")).toString();
       const orientation = aspect === "9:16" ? "portrait" : "landscape";
-      const rawScenes = Array.isArray(body.scenes) ? body.scenes.slice(0, 30) : [];
+      const rawScenes = Array.isArray(body.scenes) ? body.scenes.slice(0, 34) : [];
       if (!rawScenes.length) return res.status(400).json({ error: "scenes mancanti" });
 
       const usedIds = new Set();
+      const usedAuthors = new Set();
       const clips = [];
       const warnings = [];
       const targetRatio = aspect === "9:16" ? 9 / 16 : 16 / 9;
 
+      const searchPexels = async (query) => {
+        if (!query) return [];
+        const r = await fetch(
+          `https://api.pexels.com/v1/videos/search?query=${encodeURIComponent(query)}&orientation=${orientation}&per_page=30`,
+          { headers: { Authorization: pk } }
+        );
+        const d = await r.json();
+        if (!r.ok) throw new Error(d?.error || `Pexels ${r.status}`);
+        return Array.isArray(d?.videos) ? d.videos : [];
+      };
+
+      const scoreVideo = (v, scene, idx) => {
+        const durNeed = Math.max(1.2, Number(scene?.duration || 2));
+        const dur = Number(v?.duration || 0);
+        const author = (v?.user?.name || "").toString();
+        let score = 0;
+        if (!usedIds.has(v.id)) score += 70; else score -= 300;
+        if (author && !usedAuthors.has(author)) score += 12;
+        if (dur >= durNeed + 0.4) score += 24;
+        if (dur >= durNeed * 1.7) score += 7;
+        if (dur > 55 && agent === "pulsus") score -= 8;
+        const files = Array.isArray(v?.video_files) ? v.video_files : [];
+        const bestArea = Math.max(0, ...files.map(f => Number(f?.width || 0) * Number(f?.height || 0)));
+        if (bestArea >= 1280 * 720) score += 10;
+        if (bestArea >= 1920 * 1080) score += 4;
+        // Piccola variazione deterministica: non sceglie sempre il primo risultato.
+        score += ((Number(v?.id || 0) + idx * 17) % 11) / 10;
+        return score;
+      };
+
+      const chooseFile = (pick) => {
+        const files = (pick?.video_files || []).filter((f) => f?.file_type === "video/mp4" && f?.link);
+        files.sort((a, b) => {
+          const arA = Math.abs(((a.width || 1) / (a.height || 1)) - targetRatio);
+          const arB = Math.abs(((b.width || 1) / (b.height || 1)) - targetRatio);
+          if (Math.abs(arA - arB) > 0.025) return arA - arB;
+          const areaA = (a.width || 0) * (a.height || 0);
+          const areaB = (b.width || 0) * (b.height || 0);
+          const ideal = aspect === "9:16" ? 1080 * 1920 : 1920 * 1080;
+          return Math.abs(areaA - ideal) - Math.abs(areaB - ideal);
+        });
+        return files[0] || null;
+      };
+
       for (let i = 0; i < rawScenes.length; i++) {
         const scene = rawScenes[i] || {};
-        const query = (scene.search_query || body.topic || "cinematic").toString().trim();
+        const primary = (scene.search_query || body.topic || "cinematic").toString().trim();
+        const alt = (scene.alt_query || "").toString().trim();
+        const topic = (body.topic || "").toString().trim();
         try {
-          const r = await fetch(
-            `https://api.pexels.com/v1/videos/search?query=${encodeURIComponent(query)}&orientation=${orientation}&per_page=15`,
-            { headers: { Authorization: pk } }
-          );
-          const d = await r.json();
-          if (!r.ok) throw new Error(d?.error || `Pexels ${r.status}`);
-          let videos = Array.isArray(d?.videos) ? d.videos : [];
-          if (!videos.length && body.topic && query !== body.topic) {
-            const rr = await fetch(
-              `https://api.pexels.com/v1/videos/search?query=${encodeURIComponent(body.topic)}&orientation=${orientation}&per_page=15`,
-              { headers: { Authorization: pk } }
-            );
-            const dd = await rr.json();
-            if (rr.ok) videos = Array.isArray(dd?.videos) ? dd.videos : [];
+          let videos = [];
+          const attempts = [...new Set([primary, alt, topic].filter(Boolean))];
+
+          for (const q of attempts) {
+            const found = await searchPexels(q);
+            videos.push(...found);
+            if (videos.length >= 18) break;
           }
-          if (!videos.length) throw new Error(`nessun video per ${query}`);
 
-          let pick = videos.find((v) => !usedIds.has(v.id)) || videos[i % videos.length] || videos[0];
-          usedIds.add(pick.id);
+          // Dedup risultati prima dello scoring.
+          const map = new Map();
+          for (const v of videos) if (v?.id && !map.has(v.id)) map.set(v.id, v);
+          videos = [...map.values()];
+          if (!videos.length) throw new Error(`nessun video per ${primary}`);
 
-          const files = (pick.video_files || []).filter((f) => f?.file_type === "video/mp4" && f?.link);
-          files.sort((a, b) => {
-            const ar = Math.abs(((a.width || 1) / (a.height || 1)) - targetRatio);
-            const br = Math.abs(((b.width || 1) / (b.height || 1)) - targetRatio);
-            if (Math.abs(ar - br) > 0.05) return ar - br;
-            const ap = (a.width || 0) * (a.height || 0);
-            const bp = (b.width || 0) * (b.height || 0);
-            const ideal = aspect === "9:16" ? 1080 * 1920 : 1920 * 1080;
-            return Math.abs(ap - ideal) - Math.abs(bp - ideal);
-          });
-          const file = files[0];
+          videos.sort((a, b) => scoreVideo(b, scene, i) - scoreVideo(a, scene, i));
+          const pick = videos[0];
+          const file = chooseFile(pick);
           if (!file) throw new Error("MP4 Pexels non disponibile");
+
+          usedIds.add(pick.id);
+          if (pick.user?.name) usedAuthors.add(pick.user.name);
 
           clips.push({
             scene_index: i,
-            query,
+            query: primary,
+            alt_query: alt,
             duration: Number(scene.duration || 0),
             overlay: (scene.overlay || "").toString(),
+            purpose: (scene.purpose || "").toString(),
+            shot_type: (scene.shot_type || "").toString(),
+            energy: (scene.energy || "").toString(),
+            must_show: Array.isArray(scene.must_show) ? scene.must_show : [],
             url: file.link,
             source_url: pick.url || "",
             pexels_id: pick.id,
@@ -6078,7 +6203,11 @@ Rispondi SOLO JSON valido:
             source_duration: Number(pick.duration || 0)
           });
         } catch (e) {
-          warnings.push({ scene_index: i, query, error: String(e?.message || e).slice(0, 220) });
+          warnings.push({
+            scene_index: i,
+            query: primary,
+            error: String(e?.message || e).slice(0, 220)
+          });
         }
       }
 
@@ -6088,6 +6217,7 @@ Rispondi SOLO JSON valido:
 
       return res.status(200).json({
         ok: true,
+        version: "1.7",
         provider: "pexels",
         orientation,
         clips,
