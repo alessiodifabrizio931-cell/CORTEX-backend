@@ -5780,7 +5780,7 @@ export default async function handler(
 
 
     // ============================================================
-    // PULSUS / LUMEN — LOCAL VIDEO DIRECTOR v1.7
+    // PULSUS / LUMEN — LOCAL VIDEO DIRECTOR v1.8 STRICT BRIEF
     // Free-first: OpenRouter/Groq -> Gemini -> local fallback.
     // Director più selettivo + Pexels scoring + query alternative.
     // ============================================================
@@ -5793,6 +5793,12 @@ export default async function handler(
 
       const topic = (body.topic || "").toString().trim();
       if (!topic) return res.status(400).json({ error: "topic mancante" });
+      const originalTopic = (body.original_topic || topic).toString().trim();
+      const strictMode = body.strict_mode !== false;
+      const strictRetry = (body.strict_retry || "").toString().trim();
+      const expectedCount = Math.max(0, Math.min(50, Number(body.expected_count || 0) || 0));
+      const sourceModeRaw = (body.source_mode || "free").toString().toLowerCase();
+      const sourceMode = ["free","hybrid","ai"].includes(sourceModeRaw) ? sourceModeRaw : "free";
 
       const style = (body.style || (agent === "pulsus" ? "cinematic" : "editorial")).toString().trim();
       const goal = (body.goal || (agent === "pulsus" ? "retention" : "storytelling")).toString().trim();
@@ -5804,9 +5810,9 @@ export default async function handler(
         ? "9:16"
         : ((body.aspect_ratio || "16:9") === "9:16" ? "9:16" : "16:9");
 
-      const targetScenes = agent === "pulsus"
-        ? Math.min(16, Math.max(6, Math.round(durationSeconds / 2.55)))
-        : Math.min(32, Math.max(8, Math.round(durationSeconds / 5.7)));
+      const targetScenes = sourceMode === "ai"
+        ? (agent === "pulsus" ? Math.min(10, Math.max(2, Math.ceil(durationSeconds / 7.5))) : Math.min(24, Math.max(4, Math.ceil(durationSeconds / 7.5))))
+        : (agent === "pulsus" ? Math.min(16, Math.max(6, Math.round(durationSeconds / 2.55))) : Math.min(32, Math.max(8, Math.round(durationSeconds / 5.7))));
 
       const wordTarget = Math.max(
         agent === "pulsus" ? 32 : 65,
@@ -5815,53 +5821,68 @@ export default async function handler(
 
       const systemPrompt = agent === "pulsus"
         ? `Sei PULSUS, regista short-form premium di CORTEX.
-Mentalità: Reel/TikTok/Shorts professionali, mai slideshow stock.
-Apri con un'immagine o una frase che interrompe lo scroll entro 1,5 secondi.
-Alterna dettagli, azione, reazioni, establishing e payoff. Ogni clip deve avere una funzione.
-Il montaggio deve essere rapido ma leggibile: hard cut puliti, pattern interrupt, zero dissolvenze gratuite.
-Il voiceover è italiano parlato: frasi brevi, pause naturali, niente tono motivazionale generico, niente linguaggio da AI.`
+PRIORITÀ ASSOLUTA: esegui il brief dell'utente, non reinterpretarlo. Numeri, ordine, soggetti, vincoli, stile, tono e richieste esplicite sono requisiti HARD.
+Prima di creare le scene estrai mentalmente i criteri obbligatori e verifica che il piano li copra tutti.
+Mentalità: Reel/TikTok/Shorts professionali, mai slideshow stock. Hook entro 1,5 secondi, ritmo leggibile, scene con funzione precisa.
+Il voiceover deve essere italiano naturale, specifico sul tema, senza frasi generiche da AI. Se il brief chiede una classifica, una lista o N elementi, il voiceover e le scene devono rispettare esattamente N e l'ordine previsto.`
         : `Sei LUMEN, regista/editor long-form premium di CORTEX.
-Mentalità: mini-documentario/editorial video, non sequenza casuale di stock.
-Costruisci apertura, sviluppo, respiro, capitoli impliciti e payoff.
-Alterna establishing, processo, dettagli, persone, contesto e reazioni.
-Il voiceover è italiano naturale, più calmo e narrativo di PULSUS, con frasi respirabili e transizioni reali.
-Evita ripetizioni, B-roll casuale, cliché e frasi da intelligenza artificiale.`;
+PRIORITÀ ASSOLUTA: esegui il brief dell'utente, non reinterpretarlo. Numeri, ordine, soggetti, vincoli, stile, tono e richieste esplicite sono requisiti HARD.
+Prima di creare le scene estrai mentalmente i criteri obbligatori e verifica che il piano li copra tutti.
+Mentalità: mini-documentario/editorial video con apertura, sviluppo, capitoli, respiro e payoff; mai B-roll casuale.
+Il voiceover deve essere italiano naturale, specifico sul tema e coerente con ogni scena. Se il brief chiede una classifica, una lista o N elementi, il voiceover e le scene devono rispettare esattamente N e l'ordine previsto.`;
 
-      const userPrompt = `Progetta un video di ${durationSeconds}s.
-TEMA: ${JSON.stringify(topic)}
+      const userPrompt = `Crea un piano video STRICT-BRIEF.
+BRIEF ORIGINALE (fonte di verità): ${JSON.stringify(originalTopic)}
+TEMA OPERATIVO: ${JSON.stringify(topic)}
 STILE: ${style}
 OBIETTIVO: ${goal}
 FORMATO: ${aspect}
+MODALITÀ VISIVA: ${sourceMode === "ai" ? "100% VIDEO GENERATO DA AI" : sourceMode === "hybrid" ? "IBRIDA AI + FOOTAGE REALE" : "FOOTAGE REALE FREE"}
+DURATA: ${durationSeconds}s
 SCENE TARGET: circa ${targetScenes}
 VOICEOVER TARGET: circa ${wordTarget} parole.
+STRICT MODE: ${strictMode ? "ON" : "OFF"}
+${expectedCount ? `NUMERO ESPLICITO RILEVATO: ${expectedCount}. Deve essere rispettato.` : ""}
+${strictRetry ? `CORREZIONE OBBLIGATORIA DAL VALIDATORE: ${strictRetry}` : ""}
 
-REGOLE FOOTAGE:
-- search_query e alt_query DEVONO essere in inglese.
-- Devono descrivere ciò che deve essere VISIBILE, non concetti astratti.
-- Ogni scena deve cercare un'inquadratura diversa.
-- Non ripetere la stessa query.
-- must_show deve indicare 1-3 elementi visuali concreti.
+CONTRATTO DI FEDELTÀ:
+1. Non sostituire il soggetto con materiale genericamente simile.
+2. Non ignorare numeri, classifiche, nomi, categorie, ordine, colori, ambiente, tono, formato o CTA richiesti.
+3. Ogni criterio esplicito deve comparire in hard_constraints e criteria_checklist.
+4. criteria_checklist deve dire PASS solo se il piano lo soddisfa davvero.
+5. Se il brief contiene N elementi distinti, crea ranking_items con esattamente N voci e scene sufficienti a rappresentarli.
+6. Il voiceover deve parlare del contenuto richiesto, non di concetti astratti o frasi riempitive.
+7. Per persone/eventi reali: non inventare fatti. Se il footage disponibile potrebbe non mostrare esattamente il soggetto, rendi la scena identificabile con overlay/nome e una query visiva specifica.
+
+REGOLE VISIVE:
+- search_query e alt_query in inglese, concrete e visivamente cercabili.
+- ai_prompt in inglese, dettagliato: soggetto, azione, camera, luce, mood, ambiente, continuità.
+- subject deve dire con precisione cosa rappresenta la scena.
+- must_show 1-4 elementi concreti.
+- overlay massimo 8 parole, ma può contenere il nome/numero necessario.
 - shot_type: close-up | detail | medium | wide | action | portrait | process | environment.
 - energy: low | medium | high.
-- overlay: massimo 7 parole, solo quando aggiunge valore.
 
 VOICEOVER:
-- italiano parlato naturale.
-- punteggiatura utile alle pause.
-- niente elenchi recitati.
-- niente "in un mondo dove", "scopri", "lasciati trasportare", "non è solo".
-- PULSUS: attacco immediato e payoff netto.
-- LUMEN: apertura forte, respiro e sviluppo.
+- SOLO italiano naturale (it-IT).
+- frasi pronunziabili e coerenti con il brief.
+- niente cliché: "in un mondo dove", "scopri", "lasciati trasportare", "non è solo".
 
 Rispondi SOLO JSON valido:
 {
   "title":"...",
   "hook":"...",
+  "hard_constraints":["..."],
+  "criteria_checklist":[{"criterion":"...","status":"PASS","evidence":"..."}],
+  "ranking_items":[{"rank":1,"name":"...","reason":"..."}],
   "voiceover":"...",
+  "music_brief":"strumentale, mood, energia, strumenti, no vocals",
   "scenes":[
     {
+      "subject":"soggetto preciso",
       "search_query":"english visual query",
       "alt_query":"second english visual query",
+      "ai_prompt":"detailed english AI-video prompt",
       "overlay":"",
       "duration":3.0,
       "purpose":"funzione narrativa",
@@ -5886,9 +5907,11 @@ Rispondi SOLO JSON valido:
         if (!p || typeof p !== "object") return null;
         let scenes = Array.isArray(p.scenes) ? p.scenes.filter(Boolean) : [];
         scenes = scenes.map((s, idx) => ({
+          subject: (s?.subject || s?.overlay || s?.purpose || "").toString().trim().slice(0, 180),
           search_query: (s?.search_query || topic).toString().trim().slice(0, 180),
           alt_query: (s?.alt_query || "").toString().trim().slice(0, 180),
-          overlay: (s?.overlay || "").toString().trim().slice(0, 65),
+          ai_prompt: (s?.ai_prompt || s?.search_query || topic).toString().trim().slice(0, 900),
+          overlay: (s?.overlay || "").toString().trim().slice(0, 80),
           duration: Number(s?.duration || 0),
           purpose: (s?.purpose || "").toString().trim().slice(0, 180),
           shot_type: normEnum(s?.shot_type,
@@ -5929,10 +5952,25 @@ Rispondi SOLO JSON valido:
           duration: Number((s.duration * scale).toFixed(3))
         }));
 
+        const hardConstraints = Array.isArray(p.hard_constraints) ? p.hard_constraints.map(x=>String(x).trim()).filter(Boolean).slice(0,24) : [];
+        const checklist = Array.isArray(p.criteria_checklist) ? p.criteria_checklist.map(x=>({
+          criterion:String(x?.criterion||"").trim().slice(0,220),
+          status:(String(x?.status||"PASS").toUpperCase()==="PASS"?"PASS":"FAIL"),
+          evidence:String(x?.evidence||"").trim().slice(0,320)
+        })).filter(x=>x.criterion).slice(0,24) : [];
+        const rankingItems = Array.isArray(p.ranking_items) ? p.ranking_items.map((x,i)=>({
+          rank:Number(x?.rank||i+1), name:String(x?.name||"").trim().slice(0,120), reason:String(x?.reason||"").trim().slice(0,280)
+        })).filter(x=>x.name).slice(0,50) : [];
+        if (expectedCount && rankingItems.length && rankingItems.length !== expectedCount) return null;
+
         return {
           title: (p.title || topic).toString().trim().slice(0, 120),
           hook: (p.hook || "").toString().trim().slice(0, 240),
+          hard_constraints: hardConstraints,
+          criteria_checklist: checklist,
+          ranking_items: rankingItems,
           voiceover: (p.voiceover || "").toString().trim(),
+          music_brief: (p.music_brief || "cinematic instrumental underscore, no vocals").toString().trim().slice(0,500),
           edit_profile: agent === "pulsus" ? "SHORT_HARD_CUTS" : "EDITORIAL_SOFT_CONTINUITY",
           scenes
         };
@@ -6060,9 +6098,11 @@ Rispondi SOLO JSON valido:
         const count = Math.min(targetScenes, variants.length);
         const d = durationSeconds / count;
         const scenes = variants.slice(0, count).map((v, i) => ({
+          subject: i === 0 ? originalTopic : `visual ${i+1} coerente con il brief`,
           search_query: v[0],
           alt_query: v[1],
-          overlay: i === 0 ? topic.slice(0, 60) : "",
+          ai_prompt: `${v[0]}, cinematic, realistic, precise subject, coherent with: ${originalTopic}`,
+          overlay: i === 0 ? originalTopic.slice(0, 60) : "",
           duration: Number(d.toFixed(3)),
           purpose: i === 0 ? "hook visuale" : "progressione visuale",
           shot_type: v[2],
@@ -6073,9 +6113,13 @@ Rispondi SOLO JSON valido:
           provider: "heuristic",
           model: "local-fallback",
           plan: {
-            title: topic,
-            hook: topic,
+            title: originalTopic,
+            hook: originalTopic,
+            hard_constraints: ["Rispettare integralmente il brief originale"],
+            criteria_checklist: [{criterion:"Brief originale",status:"FAIL",evidence:"Fallback euristico: regia AI non disponibile"}],
+            ranking_items: [],
             voiceover: "",
+            music_brief: "cinematic instrumental underscore, no vocals",
             edit_profile: agent === "pulsus" ? "SHORT_HARD_CUTS" : "EDITORIAL_SOFT_CONTINUITY",
             scenes
           }
@@ -6084,7 +6128,9 @@ Rispondi SOLO JSON valido:
 
       return res.status(200).json({
         ok: true,
-        version: "1.7",
+        version: "1.8",
+        strict_mode: strictMode,
+        source_mode: sourceMode,
         agent,
         duration_seconds: durationSeconds,
         aspect_ratio: aspect,
@@ -6093,6 +6139,46 @@ Rispondi SOLO JSON valido:
         plan: result.plan,
         diagnostics
       });
+    }
+
+    // ============================================================
+    // PULSUS / LUMEN — GEMINI TTS v1.8 (free-tier capable)
+    // Returns raw 24kHz mono PCM as base64; worker converts locally.
+    // ============================================================
+    if (body.action === "video_tts_local") {
+      const key = process.env.GEMINI_API_KEY;
+      if (!key) return res.status(500).json({ error: "GEMINI_API_KEY mancante" });
+      const transcript = (body.text || "").toString().trim();
+      if (!transcript) return res.status(400).json({ error: "text mancante" });
+      if (transcript.length > 6500) return res.status(400).json({ error: "text troppo lungo per singolo chunk" });
+      const agent = (body.agent || "pulsus").toString().toLowerCase();
+      const style = (body.style || "natural").toString().trim();
+      const voiceName = (body.voice_name || (agent === "lumen" ? "Charon" : "Kore")).toString().trim();
+      const direction = agent === "lumen"
+        ? `Speak in Italian. Natural premium documentary narration. Warm, calm, human, nuanced. Medium-slow pace, natural breathing, no announcer voice. Style hint: ${style}. Read exactly the transcript after TRANSCRIPT.`
+        : `Speak in Italian. Natural premium social narration. Human, confident, energetic but not commercial or robotic. Medium pace, natural pauses. Style hint: ${style}. Read exactly the transcript after TRANSCRIPT.`;
+      const prompt = `${direction}\n\nTRANSCRIPT:\n${transcript}`;
+      try {
+        const model = process.env.GEMINI_TTS_MODEL || "gemini-3.1-flash-tts-preview";
+        const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-goog-api-key": key },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: {
+              responseModalities: ["AUDIO"],
+              speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } }
+            }
+          })
+        });
+        const d = await r.json();
+        if (!r.ok) return res.status(r.status).json({ error: d?.error?.message || `Gemini TTS ${r.status}` });
+        const part = d?.candidates?.[0]?.content?.parts?.find(x=>x?.inlineData?.data);
+        if (!part?.inlineData?.data) return res.status(502).json({ error: "Gemini TTS non ha restituito audio" });
+        return res.status(200).json({ ok:true, provider:"gemini-tts", model, voice:voiceName, mime_type:part.inlineData.mimeType||"audio/L16;rate=24000", sample_rate:24000, channels:1, pcm_base64:part.inlineData.data });
+      } catch (e) {
+        return res.status(502).json({ error: String(e?.message || e) });
+      }
     }
 
     if (body.action === "video_assets_local") {
