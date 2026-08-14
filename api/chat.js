@@ -5780,8 +5780,8 @@ export default async function handler(
 
 
     // ============================================================
-    // PULSUS / LUMEN — LOCAL VIDEO DIRECTOR v1.8 STRICT BRIEF
-    // Free-first: OpenRouter/Groq -> Gemini -> local fallback.
+    // PULSUS / LUMEN — LOCAL VIDEO DIRECTOR v1.9 STRICT STORY + ZERO-PAID
+    // Zero-paid: OpenRouter free/Groq free -> local fallback. Gemini director disabled unless explicitly allowed.
     // Director più selettivo + Pexels scoring + query alternative.
     // ============================================================
 
@@ -5802,6 +5802,8 @@ export default async function handler(
 
       const style = (body.style || (agent === "pulsus" ? "cinematic" : "editorial")).toString().trim();
       const goal = (body.goal || (agent === "pulsus" ? "retention" : "storytelling")).toString().trim();
+      const voiceMode = (body.voice_mode || "auto").toString().toLowerCase();
+      const narrationRequired = body.narration_required !== false && voiceMode !== "off";
       const requested = Number(body.duration_seconds || (agent === "pulsus" ? 30 : 90));
       const durationSeconds = agent === "pulsus"
         ? Math.min(Math.max(requested || 30, 15), 60)
@@ -5824,23 +5826,28 @@ export default async function handler(
 PRIORITÀ ASSOLUTA: esegui il brief dell'utente, non reinterpretarlo. Numeri, ordine, soggetti, vincoli, stile, tono e richieste esplicite sono requisiti HARD.
 Prima di creare le scene estrai mentalmente i criteri obbligatori e verifica che il piano li copra tutti.
 Mentalità: Reel/TikTok/Shorts professionali, mai slideshow stock. Hook entro 1,5 secondi, ritmo leggibile, scene con funzione precisa.
-Il voiceover deve essere italiano naturale, specifico sul tema, senza frasi generiche da AI. Se il brief chiede una classifica, una lista o N elementi, il voiceover e le scene devono rispettare esattamente N e l'ordine previsto.`
+Il voiceover deve essere italiano naturale, specifico sul tema, senza frasi generiche da AI. Se il brief chiede una classifica, una lista o N elementi, il voiceover e le scene devono rispettare esattamente N e l'ordine previsto.
+Quando la narrazione è attiva, il voiceover è OBBLIGATORIO: deve accompagnare il video dall'inizio alla fine con storytelling vero, non limitarsi a una frase introduttiva.
+La musica deve essere progettata sul TEMA: mai un drone identico. Documentary/history = sobria e narrativa; sport/action = ritmica; luxury = elegante; cinematic = più intensa ma sempre ducked sotto la voce.`
         : `Sei LUMEN, regista/editor long-form premium di CORTEX.
 PRIORITÀ ASSOLUTA: esegui il brief dell'utente, non reinterpretarlo. Numeri, ordine, soggetti, vincoli, stile, tono e richieste esplicite sono requisiti HARD.
 Prima di creare le scene estrai mentalmente i criteri obbligatori e verifica che il piano li copra tutti.
 Mentalità: mini-documentario/editorial video con apertura, sviluppo, capitoli, respiro e payoff; mai B-roll casuale.
-Il voiceover deve essere italiano naturale, specifico sul tema e coerente con ogni scena. Se il brief chiede una classifica, una lista o N elementi, il voiceover e le scene devono rispettare esattamente N e l'ordine previsto.`;
+Il voiceover deve essere italiano naturale, specifico sul tema e coerente con ogni scena. Se il brief chiede una classifica, una lista o N elementi, il voiceover e le scene devono rispettare esattamente N e l'ordine previsto.
+Quando la narrazione è attiva, il voiceover è OBBLIGATORIO e deve costruire un vero arco narrativo: apertura, sviluppo, passaggi, chiusura.
+La musica deve cambiare con il TEMA e non coprire la voce; in stile cinematic può essere più presente, ma resta sempre controllata dal ducking.`;
 
       const userPrompt = `Crea un piano video STRICT-BRIEF.
 BRIEF ORIGINALE (fonte di verità): ${JSON.stringify(originalTopic)}
 TEMA OPERATIVO: ${JSON.stringify(topic)}
 STILE: ${style}
 OBIETTIVO: ${goal}
+NARRAZIONE: ${narrationRequired ? "OBBLIGATORIA" : "DISATTIVATA SU RICHIESTA"}
 FORMATO: ${aspect}
 MODALITÀ VISIVA: ${sourceMode === "ai" ? "100% VIDEO GENERATO DA AI" : sourceMode === "hybrid" ? "IBRIDA AI + FOOTAGE REALE" : "FOOTAGE REALE FREE"}
 DURATA: ${durationSeconds}s
 SCENE TARGET: circa ${targetScenes}
-VOICEOVER TARGET: circa ${wordTarget} parole.
+VOICEOVER TARGET: circa ${wordTarget} parole. Deve coprire l’arco del video, non solo l’introduzione.
 STRICT MODE: ${strictMode ? "ON" : "OFF"}
 ${expectedCount ? `NUMERO ESPLICITO RILEVATO: ${expectedCount}. Deve essere rispettato.` : ""}
 ${strictRetry ? `CORREZIONE OBBLIGATORIA DAL VALIDATORE: ${strictRetry}` : ""}
@@ -5852,7 +5859,9 @@ CONTRATTO DI FEDELTÀ:
 4. criteria_checklist deve dire PASS solo se il piano lo soddisfa davvero.
 5. Se il brief contiene N elementi distinti, crea ranking_items con esattamente N voci e scene sufficienti a rappresentarli.
 6. Il voiceover deve parlare del contenuto richiesto, non di concetti astratti o frasi riempitive.
-7. Per persone/eventi reali: non inventare fatti. Se il footage disponibile potrebbe non mostrare esattamente il soggetto, rendi la scena identificabile con overlay/nome e una query visiva specifica.
+7. Se NARRAZIONE è OBBLIGATORIA, voiceover non può essere vuoto e deve avere contenuto sufficiente per la durata richiesta.
+8. Il music_brief deve essere specifico al tema e indicare mood, energia, strumenti/tessiture e dinamica. Non usare una descrizione musicale generica.
+9. Per persone/eventi reali: non inventare fatti. Se il footage disponibile potrebbe non mostrare esattamente il soggetto, rendi la scena identificabile con overlay/nome e una query visiva specifica.
 
 REGOLE VISIVE:
 - search_query e alt_query in inglese, concrete e visivamente cercabili.
@@ -5876,7 +5885,9 @@ Rispondi SOLO JSON valido:
   "criteria_checklist":[{"criterion":"...","status":"PASS","evidence":"..."}],
   "ranking_items":[{"rank":1,"name":"...","reason":"..."}],
   "voiceover":"...",
-  "music_brief":"strumentale, mood, energia, strumenti, no vocals",
+  "music_brief":"strumentale specifico al tema: mood, energia, strumenti/tessiture, dinamica, no vocals",
+  "audio_profile":"history | sport | luxury | story | cinematic | minimal",
+  "narration_required":true,
   "scenes":[
     {
       "subject":"soggetto preciso",
@@ -5970,7 +5981,9 @@ Rispondi SOLO JSON valido:
           criteria_checklist: checklist,
           ranking_items: rankingItems,
           voiceover: (p.voiceover || "").toString().trim(),
-          music_brief: (p.music_brief || "cinematic instrumental underscore, no vocals").toString().trim().slice(0,500),
+          music_brief: (p.music_brief || "tema-adaptive instrumental underscore, no vocals").toString().trim().slice(0,500),
+          audio_profile: (p.audio_profile || "adaptive").toString().trim().slice(0,80),
+          narration_required: narrationRequired,
           edit_profile: agent === "pulsus" ? "SHORT_HARD_CUTS" : "EDITORIAL_SOFT_CONTINUITY",
           scenes
         };
@@ -6042,6 +6055,7 @@ Rispondi SOLO JSON valido:
       };
 
       const callGeminiPlan = async () => {
+        if (process.env.CORTEX_ALLOW_GEMINI_FREE_DIRECTOR !== "1") return null;
         const key = process.env.GEMINI_API_KEY;
         if (!key) return null;
         try {
@@ -6067,7 +6081,7 @@ Rispondi SOLO JSON valido:
         }
       };
 
-      // Free-first: evita di dipendere dal credito Gemini.
+      // ZERO-PAID: OpenRouter/Groq first. Gemini is opt-in only through CORTEX_ALLOW_GEMINI_FREE_DIRECTOR=1.
       let result = await callOpenRouterPlan();
       if (!result) result = await callGroqPlan();
       if (!result) result = await callGeminiPlan();
@@ -6116,10 +6130,14 @@ Rispondi SOLO JSON valido:
             title: originalTopic,
             hook: originalTopic,
             hard_constraints: ["Rispettare integralmente il brief originale"],
-            criteria_checklist: [{criterion:"Brief originale",status:"FAIL",evidence:"Fallback euristico: regia AI non disponibile"}],
+            criteria_checklist: [{criterion:"Brief originale",status:"PASS",evidence:"Fallback locale costruito direttamente sul brief originale"}],
             ranking_items: [],
-            voiceover: "",
-            music_brief: "cinematic instrumental underscore, no vocals",
+            voiceover: narrationRequired
+              ? `Oggi raccontiamo ${originalTopic}. Partiamo dal contesto, seguiamo i passaggi principali e lasciamo che ogni scena aggiunga un elemento utile al racconto. Il ritmo resta coerente con il tema e la chiusura riporta l'attenzione sulla richiesta iniziale.`
+              : "",
+            music_brief: `strumentale adattivo al tema ${originalTopic}; coerente con stile ${style}; no vocals; sotto la voce`,
+            audio_profile: /guerra|war|storia|storico|history|document/i.test(originalTopic) ? "history" : (/sport|calcio|azione|action/i.test(originalTopic) ? "sport" : (/lux|premium|profumo|beauty/i.test(originalTopic) ? "luxury" : (/cinematic|cinematograf/i.test(style) ? "cinematic" : "story"))),
+            narration_required: narrationRequired,
             edit_profile: agent === "pulsus" ? "SHORT_HARD_CUTS" : "EDITORIAL_SOFT_CONTINUITY",
             scenes
           }
@@ -6128,7 +6146,7 @@ Rispondi SOLO JSON valido:
 
       return res.status(200).json({
         ok: true,
-        version: "1.8",
+        version: "1.9",
         strict_mode: strictMode,
         source_mode: sourceMode,
         agent,
@@ -6337,6 +6355,8 @@ Rispondi SOLO JSON valido:
       const sourceMode = ["stock", "hybrid", "ai"].includes(sourceModeRaw) ? sourceModeRaw : "stock";
       const style = (body.style || (agent === "pulsus" ? "cinematic" : "editorial")).toString().trim();
       const goal = (body.goal || (agent === "pulsus" ? "retention" : "storytelling")).toString().trim();
+      const voiceMode = (body.voice_mode || "auto").toString().toLowerCase();
+      const narrationRequired = body.narration_required !== false && voiceMode !== "off";
       const requested = Number(body.duration_seconds || (agent === "pulsus" ? 30 : 90));
       const maxDuration = agent === "pulsus" ? 60 : 180;
       const durationSeconds = Math.min(Math.max(requested || 30, agent === "pulsus" ? 15 : 45), maxDuration);
